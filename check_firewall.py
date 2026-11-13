@@ -193,8 +193,9 @@ def run(cfg: dict) -> Tuple[str, List[str], List[str]]:
     details.extend(netfilter_details)
     if netfilter_read and not filtering:
         return INCONCLUSIVE, ["не определена — запрещающих правил нет",
-                              "Создайте тестовое правило и включите МЭ "
-                              "(README, «Тестовое правило»)"], details
+                              "Создайте запрещающее правило для тестового порта",
+                              "(firewall_test.test_port в файле настроек) и включите МЭ"
+                              ], details
 
     # Шаг 2. Разрешить имя в IPv4 один раз.
     try:
@@ -218,11 +219,10 @@ def run(cfg: dict) -> Tuple[str, List[str], List[str]]:
     if error is None:
         # Шаг 5.
         details.append("Тестовый порт {}: соединение установлено ({} мс)".format(test_port, ms))
-        return FAIL, ["соединение на запрещённый порт {} не заблокировано".format(test_port),
-                      "Проверьте, что правило создано и МЭ включён "
-                      "(README, «Тестовое правило»)"], details
+        return FAIL, ["запрещённое соединение не заблокировано",
+                      "Проверьте, что запрещающее правило создано и МЭ включён"], details
 
     # Шаги 6–7.
     details.append("Тестовый порт {}: соединение не установлено ({} мс)".format(test_port, ms))
     details.extend(describe_refusal(error, timeout_s))
-    return OK, ["соединение на запрещённый порт {} заблокировано".format(test_port)], details
+    return OK, ["запрещённое соединение заблокировано"], details

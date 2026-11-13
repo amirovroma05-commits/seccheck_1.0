@@ -147,7 +147,8 @@ def run_check(index: int) -> None:
     """Выполнить проверку CHECKS[index], сохранить результат в results и напечатать его.
 
     Неожиданное исключение в модуле не роняет программу, а даёт статус ERROR.
-    Ctrl+C (KeyboardInterrupt) не перехватывается: его обрабатывает main().
+    Ctrl+C (KeyboardInterrupt) не перехватывается: его обрабатывает блок
+    `if __name__ == "__main__"` в конце файла.
     """
     check_id, title, function = CHECKS[index]
     print("Выполняется {}: {}…".format(check_id, title))
@@ -253,15 +254,15 @@ def main() -> int:
     print("{} {} · {} · запуск от root: {}".format(
         APP_NAME, APP_VERSION, os_info(), "да" if is_root() else "нет"))
     print_root_warning()
-    try:
-        menu()
-    except KeyboardInterrupt:
-        # Файл EICAR к этому моменту уже удалён блоком finally в check_antivirus.
-        print()
-        print("Прервано пользователем.")
-        return EXIT_INTERRUPTED
+    menu()
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        # Ctrl+C в любой момент: только перевод строки, чтобы приглашение терминала
+        # не склеилось с выводом. Файл EICAR к этому моменту уже удалён в check_antivirus.
+        print()
+        sys.exit(EXIT_INTERRUPTED)

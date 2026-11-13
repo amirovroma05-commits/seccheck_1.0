@@ -113,6 +113,30 @@ def write_and_wait(path: str, content: str, timeout_s: float,
             return FAIL, "тестовый файл не обнаружен за {} с".format(timeout_s)
 
 
+def remove_test_files(path: str, tmp_dir: str) -> Tuple[List[str], List[str]]:
+    """Шаг 10. Удалить свой тестовый файл и свой подкаталог.
+
+    Вернуть (подробности, предупреждения). os.rmdir удаляет только пустой каталог, а сам
+    eicar_dir и всё прочее в нём программа не трогает.
+    """
+    details = []
+    warnings = []
+    try:
+        os.remove(path)
+        details.append("Тестовый файл удалён программой")
+    except FileNotFoundError:
+        details.append("Тестовый файл к моменту удаления уже отсутствовал")
+    except OSError as exc:
+        warnings.append("Внимание: не удалось удалить {}: {}".format(
+            path, os_error_text(exc)))
+    try:
+        os.rmdir(tmp_dir)
+    except OSError as exc:
+        warnings.append("Внимание: не удалось удалить каталог {}: {}".format(
+            tmp_dir, os_error_text(exc)))
+    return details, warnings
+
+
 def run(cfg: dict) -> Tuple[str, List[str], List[str]]:
     """Выполнить проверку M4. Вернуть (статус, краткие строки, подробности).
 
@@ -129,31 +153,25 @@ def run(cfg: dict) -> Tuple[str, List[str], List[str]]:
             os_error_text(exc))], []
     path = os.path.join(tmp_dir, FILE_NAME)
     details = ["Тестовый файл: " + path]
-    # Предупреждения о неудалённом файле или каталоге печатаются всегда, а не только с -v:
-    # на диске остался тестовый файл, пользователь должен об этом знать.
-    warnings = []
 
     try:
         status, result = write_and_wait(path, content, cfg["eicar_timeout_s"],
                                         cfg["poll_interval_s"])
-    finally:
-        # Шаг 10. Удалить свой файл и свой подкаталог в любом случае, в том числе после
-        # Ctrl+C. os.rmdir удаляет только пустой каталог, а сам eicar_dir и всё прочее
-        # в нём программа не трогает.
+    except BaseException:
+        # Ctrl+C (KeyboardInterrupt) или неожиданный сбой: результата проверки не будет,
+        # поэтому файл удаляется здесь, а предупреждения о неудаче печатаются сразу.
+        # Затем исключение передаётся дальше (raise).
         clear_progress()
-        try:
-            os.remove(path)
-            details.append("Тестовый файл удалён программой")
-        except FileNotFoundError:
-            details.append("Тестовый файл к моменту удаления уже отсутствовал")
-        except OSError as exc:
-            warnings.append("Внимание: не удалось удалить {}: {}".format(
-                path, os_error_text(exc)))
-        try:
-            os.rmdir(tmp_dir)
-        except OSError as exc:
-            warnings.append("Внимание: не удалось удалить каталог {}: {}".format(
-                tmp_dir, os_error_text(exc)))
+        _cleanup_details, warnings = remove_test_files(path, tmp_dir)
+        for line in warnings:
+            print(line)
+        raise
+
+    # Шаг 10. Обычное завершение: удалить файл. Предупреждения о неудалённом файле или
+    # каталоге печатаются всегда, а не только с -v: на диске остался тестовый файл.
+    clear_progress()
+    cleanup_details, warnings = remove_test_files(path, tmp_dir)
+    details.extend(cleanup_details)
 
     brief = [result]
     if status == FAIL:
