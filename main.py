@@ -15,6 +15,7 @@ import sys
 sys.dont_write_bytecode = True
 
 import argparse  # noqa: E402
+import os  # noqa: E402
 import platform  # noqa: E402
 import socket  # noqa: E402
 from datetime import datetime  # noqa: E402
@@ -27,10 +28,29 @@ import check_presence  # noqa: E402
 from common import (APP_NAME, APP_VERSION, ERROR, FAIL, INCONCLUSIVE,  # noqa: E402
                     NOT_RUN, OK, WARNING, is_root, os_info)
 
-# Проверки по порядку: (идентификатор, название, функция run модуля).
+# Файл продуктов по умолчанию: products.json в каталоге, где лежит main.py.
+# realpath раскрывает символические ссылки, чтобы найти настоящий каталог программы.
+DEFAULT_PRODUCTS_PATH = os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                                     "products.json")
+
+# Код возврата, если файл продуктов не прошёл проверку.
+EXIT_BAD_PRODUCTS = 2
+
+# Список продуктов для M2 и путь к файлу, из которого он загружен.
+# Заполняются один раз в main() до показа меню.
+products: List[dict] = []
+products_path = ""
+
+
+def run_presence() -> Tuple[str, List[str]]:
+    """Запустить M2 с загруженным списком продуктов."""
+    return check_presence.run(products)
+
+
+# Проверки по порядку: (идентификатор, название, функция без аргументов).
 CHECKS = [
     ("M1", "Подключение к интернету", check_network.run),
-    ("M2", "Наличие МЭ и АВ", check_presence.run),
+    ("M2", "Наличие МЭ и АВ", run_presence),
     ("M3", "Работоспособность МЭ", check_firewall.run),
     ("M4", "Работоспособность АВ", check_antivirus.run),
 ]
@@ -97,6 +117,7 @@ def print_report() -> None:
     print("ПК: {} · {} · Python {} · запуск от root: {}".format(
         socket.gethostname(), os_info(), platform.python_version(),
         "да" if is_root() else "нет"))
+    print("Файл продуктов: " + products_path)
     print()
 
     # Проверка, которой нет в results, показывается как NOT_RUN.
@@ -156,7 +177,20 @@ def main() -> int:
         description="Контроль работоспособности антивируса и межсетевого экрана в Linux.")
     parser.add_argument("--version", action="version",
                         version="{} {}".format(APP_NAME, APP_VERSION))
-    parser.parse_args()
+    parser.add_argument("--products", metavar="PATH", default=DEFAULT_PRODUCTS_PATH,
+                        help="файл со списком продуктов для M2 "
+                             "(по умолчанию products.json рядом с main.py)")
+    args = parser.parse_args()
+
+    # Список продуктов загружается один раз до показа меню.
+    # Битый файл — программа не запускается.
+    global products, products_path
+    products_path = os.path.abspath(args.products)
+    try:
+        products = check_presence.load_products(products_path)
+    except ValueError as exc:
+        print("Ошибка в файле продуктов: {}".format(exc), file=sys.stderr)
+        return EXIT_BAD_PRODUCTS
 
     print("{} {} · {} · запуск от root: {}".format(
         APP_NAME, APP_VERSION, os_info(), "да" if is_root() else "нет"))

@@ -1,14 +1,20 @@
 """M2. Обнаружение межсетевого экрана (МЭ) и антивируса (АВ).
 
 В Linux нет единого реестра средств защиты, поэтому применяются два способа:
-(а) поиск известных продуктов из списка PRODUCTS по службам systemd и файлам;
+(а) поиск известных продуктов из списка products.json по службам systemd и файлам;
 (б) универсальная проверка: есть ли запрещающие правила в netfilter, через который
 работают практически все сетевые фильтры Linux.
+
+Файл продуктов читает программа с правами root, поэтому в его формате нет полей
+с командами: имена служб передаются в systemctl отдельным аргументом через run_cmd,
+пути проверяются только через os.path.exists.
 """
 
 from __future__ import annotations
 
+import json
 import os
+import re
 from typing import List, Tuple
 
 from common import CMD_NOT_FOUND, FAIL, OK, WARNING, is_root, run_cmd
@@ -29,50 +35,35 @@ LEVEL_NAMES = {
     ACTIVE: "защита активна",
 }
 
-# Известные продукты.
-#   kinds              — "antivirus" и/или "firewall";
-#   services           — службы systemd: любая активная -> RUNNING;
-#   paths              — файлы: любой существующий -> INSTALLED;
-#   protection_service — служба резидентной защиты АВ: активна -> ACTIVE;
-#   needs_filtering    — для МЭ: ACTIVE, если служба активна и netfilter фильтрует.
-# Если ни protection_service, ни needs_filtering нет, максимальный уровень — RUNNING.
-PRODUCTS = [
-    {
-        "name": "ClamAV",
-        "kinds": ["antivirus"],
-        "services": ["clamav-daemon"],
-        "paths": ["/usr/sbin/clamd"],
-        # TODO(стенд): проверить имя службы clamonacc в используемом дистрибутиве.
-        "protection_service": "clamav-clamonacc",
-        "needs_filtering": False,
-    },
-    {
-        "name": "ufw",
-        "kinds": ["firewall"],
-        "services": ["ufw"],
-        "paths": ["/usr/sbin/ufw"],
-        "protection_service": None,
-        "needs_filtering": True,
-    },
-    {
-        # Имена не проверены на стенде: взяты из документации производителя.
-        "name": "Dr.Web для Linux",
-        "kinds": ["antivirus", "firewall"],
-        "services": ["drweb-configd"],
-        "paths": ["/opt/drweb.com/bin/drweb-ctl"],
-        "protection_service": None,
-        "needs_filtering": False,
-    },
-    {
-        # Имена не проверены на стенде: взяты из документации производителя.
-        "name": "Kaspersky Endpoint Security для Linux",
-        "kinds": ["antivirus", "firewall"],
-        "services": ["kesl"],
-        "paths": ["/opt/kaspersky/kesl/bin/kesl-control"],
-        "protection_service": None,
-        "needs_filtering": False,
-    },
-]
+# Поля продукта в products.json: имя поля -> обязательно ли оно.
+#   id                  — уникальный идентификатор;
+#   name                — название для отчёта;
+#   kinds               — "antivirus" и/или "firewall";
+#   services            — службы systemd: любая активная -> RUNNING;
+#   files               — файлы: любой существующий -> INSTALLED;
+#   protection_service  — служба резидентной защиты АВ: активна -> ACTIVE;
+#   active_if_filtering — ACTIVE, если служба продукта активна и netfilter фильтрует;
+#   verified            — профиль проверен на стенде;
+#   notes               — примечание (в отчёт не выводится).
+# Без protection_service и active_if_filtering максимальный уровень продукта — RUNNING.
+PRODUCT_FIELDS = {
+    "id": True,
+    "name": True,
+    "kinds": True,
+    "services": True,
+    "files": True,
+    "protection_service": False,
+    "active_if_filtering": False,
+    "verified": False,
+    "notes": False,
+}
+
+KNOWN_KINDS = ["antivirus", "firewall"]
+
+# Допустимое имя службы systemd. Первый символ — буква или цифра, поэтому имя
+# не может начинаться с «-» и не будет принято systemctl за ключ командной строки.
+# Используется re.fullmatch: «$» в re.match пропустил бы перевод строки в конце имени.
+SERVICE_NAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9@._-]*"
 
 # Команды, выводящие правила netfilter. Правила iptables-legacy не видны через nft,
 # поэтому смотрим все источники.
@@ -81,6 +72,139 @@ NETFILTER_COMMANDS = [
     ["iptables", "-S"],
     ["iptables-legacy", "-S"],
 ]
+
+
+def show(value: object) -> str:
+    """Значение из файла для сообщения об ошибке.
+
+    json.dumps берёт строку в кавычки и экранирует управляющие символы, поэтому
+    содержимое файла не может испортить вывод в терминале.
+    """
+    return json.dumps(value, ensure_ascii=False)
+
+
+def is_service_name(value: object) -> bool:
+    """Является ли значение допустимым именем службы systemd."""
+    return isinstance(value, str) and re.fullmatch(SERVICE_NAME_PATTERN, value) is not None
+
+
+def is_string_list(value: object) -> bool:
+    """Является ли значение списком строк (возможно, пустым)."""
+    if not isinstance(value, list):
+        return False
+    for item in value:
+        if not isinstance(item, str):
+            return False
+    return True
+
+
+def check_product(item: object) -> dict:
+    """Проверить описание одного продукта и вернуть его с заполненными значениями
+    по умолчанию. При ошибке выбросить ValueError с описанием (без номера продукта).
+    """
+    if not isinstance(item, dict):
+        raise ValueError("ожидается объект {...}, получено " + show(item))
+
+    # Неизвестные поля — ошибка: так ловятся опечатки в именах полей.
+    for field in item:
+        if field not in PRODUCT_FIELDS:
+            raise ValueError("неизвестное поле " + show(field))
+    for field, required in PRODUCT_FIELDS.items():
+        if required and field not in item:
+            raise ValueError("нет обязательного поля " + show(field))
+
+    for field in ("id", "name"):
+        if not isinstance(item[field], str) or item[field].strip() == "":
+            raise ValueError("поле {} должно быть непустой строкой".format(show(field)))
+
+    kinds = item["kinds"]
+    if not is_string_list(kinds) or len(kinds) == 0:
+        raise ValueError('поле "kinds" должно быть непустым списком из "antivirus", '
+                         '"firewall"')
+    for kind in kinds:
+        if kind not in KNOWN_KINDS:
+            raise ValueError('поле "kinds": неизвестный вид {} (допустимы "antivirus", '
+                             '"firewall")'.format(show(kind)))
+
+    if not is_string_list(item["services"]):
+        raise ValueError('поле "services" должно быть списком строк')
+    for service in item["services"]:
+        if not is_service_name(service):
+            raise ValueError('поле "services": недопустимое имя службы {} (латинские буквы, '
+                             'цифры, @ . _ -; первый символ — буква или цифра)'
+                             .format(show(service)))
+
+    if not is_string_list(item["files"]):
+        raise ValueError('поле "files" должно быть списком строк')
+    for path in item["files"]:
+        if not path.startswith("/"):
+            raise ValueError('поле "files": путь {} должен быть абсолютным (начинаться '
+                             'с «/»)'.format(show(path)))
+
+    protection = item.get("protection_service")
+    if protection is not None and not is_service_name(protection):
+        raise ValueError('поле "protection_service": недопустимое имя службы {} '
+                         '(ожидается имя службы или null)'.format(show(protection)))
+
+    for field in ("active_if_filtering", "verified"):
+        if field in item and not isinstance(item[field], bool):
+            raise ValueError("поле {} должно быть true или false".format(show(field)))
+
+    if "notes" in item and not isinstance(item["notes"], str):
+        raise ValueError('поле "notes" должно быть строкой')
+
+    # Значения по умолчанию для необязательных полей.
+    product = dict(item)
+    product.setdefault("protection_service", None)
+    product.setdefault("active_if_filtering", False)
+    product.setdefault("verified", False)
+    product.setdefault("notes", "")
+    return product
+
+
+def load_products(path: str) -> List[dict]:
+    """Прочитать и проверить файл продуктов. Вернуть список словарей продуктов.
+
+    Любая ошибка (нет файла, неверный JSON, неверное поле, повтор id) превращается
+    в ValueError с текстом вида «путь: продукт №3 (id=kesl): что не так».
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as products_file:
+            data = json.load(products_file)
+    except json.JSONDecodeError as exc:
+        raise ValueError("{}: ошибка JSON в строке {}, столбце {}: {}".format(
+            path, exc.lineno, exc.colno, exc.msg))
+    except UnicodeDecodeError:
+        raise ValueError("{}: файл не в кодировке UTF-8".format(path))
+    except OSError as exc:
+        raise ValueError("{}: не удалось прочитать файл: {}".format(path, exc.strerror))
+
+    if not isinstance(data, dict):
+        raise ValueError('{}: ожидается объект {{"products": [...]}}'.format(path))
+    for field in data:
+        if field != "products":
+            raise ValueError("{}: неизвестное поле верхнего уровня {}".format(path, show(field)))
+    if "products" not in data or not isinstance(data["products"], list):
+        raise ValueError('{}: поле "products" должно быть списком'.format(path))
+
+    products = []
+    seen_ids = []
+    for number, item in enumerate(data["products"], start=1):
+        # id для сообщения об ошибке, если его удаётся прочитать.
+        product_id = "?"
+        if isinstance(item, dict) and isinstance(item.get("id"), str):
+            product_id = item["id"]
+        prefix = "{}: продукт №{} (id={})".format(path, number, product_id)
+
+        try:
+            product = check_product(item)
+        except ValueError as exc:
+            raise ValueError("{}: {}".format(prefix, exc))
+        if product["id"] in seen_ids:
+            raise ValueError("{}: id повторяется (уже был у другого продукта)".format(prefix))
+        seen_ids.append(product["id"])
+        products.append(product)
+    return products
 
 
 def service_active(name: str) -> bool:
@@ -131,7 +255,7 @@ def detect_product(product: dict) -> Tuple[int, List[str]]:
     """Шаг 3. Определить уровень продукта по файлам и службам. Вернуть (уровень, признаки)."""
     level = NOT_FOUND
     evidence = []
-    for path in product["paths"]:
+    for path in product["files"]:
         if os.path.exists(path):
             level = INSTALLED
             evidence.append("файл " + path)
@@ -142,15 +266,18 @@ def detect_product(product: dict) -> Tuple[int, List[str]]:
     return level, evidence
 
 
-def run() -> Tuple[str, List[str]]:
-    """Выполнить проверку M2. Вернуть (статус, [итог, подробности...])."""
+def run(products: List[dict]) -> Tuple[str, List[str]]:
+    """Выполнить проверку M2. Вернуть (статус, [итог, подробности...]).
+
+    products — список продуктов, загруженный load_products() при старте программы.
+    """
     # Шаг 1. Netfilter проверяем первым: от него зависит уровень МЭ.
     filtering, netfilter_details, netfilter_read = check_netfilter()
 
     found = []  # список (продукт, уровень)
     details = []
     # Шаги 2–6. Перебор продуктов.
-    for product in PRODUCTS:
+    for product in products:
         level, evidence = detect_product(product)
         if level == NOT_FOUND:
             continue
@@ -159,12 +286,14 @@ def run() -> Tuple[str, List[str]]:
         if protection is not None and service_active(protection):
             level = ACTIVE
             evidence.append("служба защиты {} активна".format(protection))
-        if product["needs_filtering"] and level == RUNNING and filtering:
+        if product["active_if_filtering"] and level == RUNNING and filtering:
             level = ACTIVE
             evidence.append("netfilter фильтрует трафик")
         found.append((product, level))
-        details.append("{}: {} ({})".format(product["name"], LEVEL_NAMES[level],
-                                            ", ".join(evidence)))
+        line = "{}: {} ({})".format(product["name"], LEVEL_NAMES[level], ", ".join(evidence))
+        if not product["verified"]:
+            line += " (профиль не проверен на стенде)"
+        details.append(line)
 
     details.extend(netfilter_details)
     if not netfilter_read and not is_root():

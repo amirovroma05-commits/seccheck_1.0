@@ -13,17 +13,19 @@ fi
 
 # Каталог, где лежит этот скрипт (исходники программы).
 SRC_DIR=$(cd "$(dirname "$0")" && pwd)
-if [ ! -f "$SRC_DIR/main.py" ]; then
-    echo "Не найден $SRC_DIR/main.py: запускайте скрипт из каталога проекта" >&2
-    exit 1
-fi
+for required in main.py products.json; do
+    if [ ! -f "$SRC_DIR/$required" ]; then
+        echo "Не найден $SRC_DIR/$required: запускайте скрипт из каталога проекта" >&2
+        exit 1
+    fi
+done
 
 # Удалить старую версию целиком, чтобы не осталось файлов, которых больше нет в проекте.
 rm -rf "$INSTALL_DIR"
 
 # Каталог и файлы принадлежат root и доступны на запись только ему.
 install -d -o root -g root -m 755 "$INSTALL_DIR"
-for file in "$SRC_DIR"/*.py; do
+for file in "$SRC_DIR"/*.py "$SRC_DIR/products.json"; do
     install -o root -g root -m 644 "$file" "$INSTALL_DIR/"
 done
 
