@@ -25,34 +25,55 @@ import check_antivirus  # noqa: E402
 import check_firewall  # noqa: E402
 import check_network  # noqa: E402
 import check_presence  # noqa: E402
-from common import (APP_NAME, APP_VERSION, ERROR, FAIL, INCONCLUSIVE,  # noqa: E402
-                    NOT_RUN, OK, WARNING, is_root, os_info)
+from common import (APP_NAME, APP_VERSION, DEFAULT_CONFIG_PATH, ERROR,  # noqa: E402
+                    FAIL, INCONCLUSIVE, NOT_RUN, OK, WARNING, is_root, load_config,
+                    os_info)
 
 # Файл продуктов по умолчанию: products.json в каталоге, где лежит main.py.
 # realpath раскрывает символические ссылки, чтобы найти настоящий каталог программы.
 DEFAULT_PRODUCTS_PATH = os.path.join(os.path.dirname(os.path.realpath(__file__)),
                                      "products.json")
 
-# Код возврата, если файл продуктов не прошёл проверку.
-EXIT_BAD_PRODUCTS = 2
+# Код возврата, если файл настроек или продуктов не прошёл проверку.
+EXIT_BAD_FILE = 2
 
-# Список продуктов для M2 и путь к файлу, из которого он загружен.
+# Настройки, список продуктов для M2 и пути к файлам, из которых они загружены.
 # Заполняются один раз в main() до показа меню.
+config: Dict[str, dict] = {}
+config_path = ""
 products: List[dict] = []
 products_path = ""
 
 
+# Каждая проверка получает свою секцию настроек. Функции ниже нужны, чтобы
+# в CHECKS все проверки вызывались одинаково — без аргументов.
+
+def run_network() -> Tuple[str, List[str]]:
+    """Запустить M1 с секцией "network"."""
+    return check_network.run(config["network"])
+
+
 def run_presence() -> Tuple[str, List[str]]:
-    """Запустить M2 с загруженным списком продуктов."""
-    return check_presence.run(products)
+    """Запустить M2 с секцией "presence" и загруженным списком продуктов."""
+    return check_presence.run(config["presence"], products)
+
+
+def run_firewall() -> Tuple[str, List[str]]:
+    """Запустить M3 с секцией "firewall_test"."""
+    return check_firewall.run(config["firewall_test"])
+
+
+def run_antivirus() -> Tuple[str, List[str]]:
+    """Запустить M4 с секцией "antivirus_test"."""
+    return check_antivirus.run(config["antivirus_test"])
 
 
 # Проверки по порядку: (идентификатор, название, функция без аргументов).
 CHECKS = [
-    ("M1", "Подключение к интернету", check_network.run),
+    ("M1", "Подключение к интернету", run_network),
     ("M2", "Наличие МЭ и АВ", run_presence),
-    ("M3", "Работоспособность МЭ", check_firewall.run),
-    ("M4", "Работоспособность АВ", check_antivirus.run),
+    ("M3", "Работоспособность МЭ", run_firewall),
+    ("M4", "Работоспособность АВ", run_antivirus),
 ]
 
 # Метки статусов для вывода.
@@ -117,6 +138,7 @@ def print_report() -> None:
     print("ПК: {} · {} · Python {} · запуск от root: {}".format(
         socket.gethostname(), os_info(), platform.python_version(),
         "да" if is_root() else "нет"))
+    print("Файл настроек: " + config_path)
     print("Файл продуктов: " + products_path)
     print()
 
@@ -177,20 +199,30 @@ def main() -> int:
         description="Контроль работоспособности антивируса и межсетевого экрана в Linux.")
     parser.add_argument("--version", action="version",
                         version="{} {}".format(APP_NAME, APP_VERSION))
+    parser.add_argument("--config", metavar="PATH", default=DEFAULT_CONFIG_PATH,
+                        help="файл настроек (по умолчанию {})".format(DEFAULT_CONFIG_PATH))
     parser.add_argument("--products", metavar="PATH", default=DEFAULT_PRODUCTS_PATH,
                         help="файл со списком продуктов для M2 "
                              "(по умолчанию products.json рядом с main.py)")
     args = parser.parse_args()
 
-    # Список продуктов загружается один раз до показа меню.
-    # Битый файл — программа не запускается.
-    global products, products_path
+    # Настройки и список продуктов загружаются один раз до показа меню.
+    # Нет файла или в нём ошибка — программа не запускается.
+    global config, config_path, products, products_path
+    config_path = os.path.abspath(args.config)
+    try:
+        config = load_config(config_path)
+    except ValueError as exc:
+        # Текст ошибки уже содержит путь к файлу и подсказку.
+        print(exc, file=sys.stderr)
+        return EXIT_BAD_FILE
+
     products_path = os.path.abspath(args.products)
     try:
         products = check_presence.load_products(products_path)
     except ValueError as exc:
         print("Ошибка в файле продуктов: {}".format(exc), file=sys.stderr)
-        return EXIT_BAD_PRODUCTS
+        return EXIT_BAD_FILE
 
     print("{} {} · {} · запуск от root: {}".format(
         APP_NAME, APP_VERSION, os_info(), "да" if is_root() else "нет"))

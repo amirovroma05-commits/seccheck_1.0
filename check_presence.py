@@ -19,8 +19,8 @@ from typing import List, Tuple
 
 from common import CMD_NOT_FOUND, FAIL, OK, WARNING, is_root, run_cmd
 
-# Таймаут одной внешней команды (systemctl, nft, iptables), с.
-CMD_TIMEOUT_S = 5
+# Настройки берутся из секции "presence" файла настроек (см. README.md, «Настройки»):
+#   cmd_timeout_s — таймаут одной внешней команды (systemctl, nft, iptables), с.
 
 # Уровни обнаружения продукта (чем больше число, тем выше уровень).
 NOT_FOUND = 0          # признаков нет
@@ -207,13 +207,13 @@ def load_products(path: str) -> List[dict]:
     return products
 
 
-def service_active(name: str) -> bool:
+def service_active(name: str, timeout_s: float) -> bool:
     """Активна ли служба systemd (`systemctl is-active` печатает «active»)."""
-    code, stdout, _stderr = run_cmd(["systemctl", "is-active", name], timeout=CMD_TIMEOUT_S)
+    code, stdout, _stderr = run_cmd(["systemctl", "is-active", name], timeout=timeout_s)
     return code == 0 and stdout.strip() == "active"
 
 
-def check_netfilter() -> Tuple[bool, List[str], bool]:
+def check_netfilter(timeout_s: float) -> Tuple[bool, List[str], bool]:
     """Шаг 1. Проверить правила netfilter.
 
     Вернуть (фильтрация включена, подробности, удалось ли прочитать хоть один источник).
@@ -225,7 +225,7 @@ def check_netfilter() -> Tuple[bool, List[str], bool]:
     details = []
     for cmd in NETFILTER_COMMANDS:
         command_text = " ".join(cmd)
-        code, stdout, stderr = run_cmd(cmd, timeout=CMD_TIMEOUT_S)
+        code, stdout, stderr = run_cmd(cmd, timeout=timeout_s)
         if code == CMD_NOT_FOUND:
             details.append("{}: утилита не установлена".format(command_text))
             continue
@@ -251,7 +251,7 @@ def check_netfilter() -> Tuple[bool, List[str], bool]:
     return filtering, details, any_read
 
 
-def detect_product(product: dict) -> Tuple[int, List[str]]:
+def detect_product(product: dict, timeout_s: float) -> Tuple[int, List[str]]:
     """Шаг 3. Определить уровень продукта по файлам и службам. Вернуть (уровень, признаки)."""
     level = NOT_FOUND
     evidence = []
@@ -260,30 +260,32 @@ def detect_product(product: dict) -> Tuple[int, List[str]]:
             level = INSTALLED
             evidence.append("файл " + path)
     for service in product["services"]:
-        if service_active(service):
+        if service_active(service, timeout_s):
             level = RUNNING
             evidence.append("служба {} активна".format(service))
     return level, evidence
 
 
-def run(products: List[dict]) -> Tuple[str, List[str]]:
+def run(cfg: dict, products: List[dict]) -> Tuple[str, List[str]]:
     """Выполнить проверку M2. Вернуть (статус, [итог, подробности...]).
 
+    cfg — секция "presence" файла настроек;
     products — список продуктов, загруженный load_products() при старте программы.
     """
     # Шаг 1. Netfilter проверяем первым: от него зависит уровень МЭ.
-    filtering, netfilter_details, netfilter_read = check_netfilter()
+    timeout_s = cfg["cmd_timeout_s"]
+    filtering, netfilter_details, netfilter_read = check_netfilter(timeout_s)
 
     found = []  # список (продукт, уровень)
     details = []
     # Шаги 2–6. Перебор продуктов.
     for product in products:
-        level, evidence = detect_product(product)
+        level, evidence = detect_product(product, timeout_s)
         if level == NOT_FOUND:
             continue
         # Шаг 5. Проверка активности защиты.
         protection = product["protection_service"]
-        if protection is not None and service_active(protection):
+        if protection is not None and service_active(protection, timeout_s):
             level = ACTIVE
             evidence.append("служба защиты {} активна".format(protection))
         if product["active_if_filtering"] and level == RUNNING and filtering:

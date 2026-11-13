@@ -13,30 +13,33 @@ from typing import List, Tuple
 
 from common import FAIL, OK, WARNING, run_cmd
 
-# Настройки проверки.
-RU_HOSTS = ["ya.ru", "vk.com"]
-FOREIGN_HOSTS = ["example.com", "github.com"]
-TCP_PORT = 443        # порт для TCP-подключения
-TCP_TIMEOUT = 3       # таймаут одного TCP-подключения, с
-PING_TIMEOUT = 2      # время ожидания ответа на ping, с (целое число)
+# Настройки берутся из секции "network" файла настроек (см. README.md, «Настройки»):
+#   ru_hosts, foreign_hosts — группы узлов;
+#   tcp_port               — порт для TCP-подключения;
+#   tcp_timeout_s          — таймаут одного TCP-подключения, с;
+#   ping_timeout_s         — время ожидания ответа на ping, с (целое число).
 
 
-def ping(host: str) -> bool:
-    """Отправить узлу один ICMP-запрос; True, если пришёл ответ."""
-    code, _stdout, _stderr = run_cmd(["ping", "-c", "1", "-W", str(PING_TIMEOUT), host],
-                                     timeout=PING_TIMEOUT + 3)
+def ping(host: str, timeout_s: int) -> bool:
+    """Отправить узлу один ICMP-запрос; True, если пришёл ответ.
+
+    Имя узла уже проверено load_config(): оно не начинается с «-», поэтому ping
+    не примет его за ключ.
+    """
+    code, _stdout, _stderr = run_cmd(["ping", "-c", "1", "-W", str(timeout_s), host],
+                                     timeout=timeout_s + 3)
     return code == 0
 
 
-def tcp_connect(host: str) -> Tuple[bool, int, bool]:
-    """Подключиться к host:TCP_PORT. Вернуть (успех, время в мс, ошибка DNS).
+def tcp_connect(host: str, port: int, timeout_s: float) -> Tuple[bool, int, bool]:
+    """Подключиться к host:port. Вернуть (успех, время в мс, ошибка DNS).
 
     socket.gaierror — имя не разрешилось (ошибка DNS); его проверяем раньше OSError,
     потому что gaierror является подклассом OSError.
     """
     start = time.monotonic()
     try:
-        connection = socket.create_connection((host, TCP_PORT), timeout=TCP_TIMEOUT)
+        connection = socket.create_connection((host, port), timeout=timeout_s)
     except socket.gaierror:
         return False, 0, True
     except OSError:
@@ -45,20 +48,24 @@ def tcp_connect(host: str) -> Tuple[bool, int, bool]:
     return True, int((time.monotonic() - start) * 1000), False
 
 
-def run() -> Tuple[str, List[str]]:
-    """Выполнить проверку M1. Вернуть (статус, [итог, подробности...])."""
+def run(cfg: dict) -> Tuple[str, List[str]]:
+    """Выполнить проверку M1. Вернуть (статус, [итог, подробности...]).
+
+    cfg — секция "network" файла настроек.
+    """
+    port = cfg["tcp_port"]
     # Шаг 1. Все узлы с пометкой группы.
     hosts = []
-    for host in RU_HOSTS:
+    for host in cfg["ru_hosts"]:
         hosts.append(("ru", host))
-    for host in FOREIGN_HOSTS:
+    for host in cfg["foreign_hosts"]:
         hosts.append(("foreign", host))
 
     # Шаги 2–3. Для каждого узла: ping (для сведения) и TCP-подключение.
     checked = []  # список словарей с результатами по узлам
     for group, host in hosts:
-        icmp = ping(host)
-        tcp, ms, dns_error = tcp_connect(host)
+        icmp = ping(host, cfg["ping_timeout_s"])
+        tcp, ms, dns_error = tcp_connect(host, port, cfg["tcp_timeout_s"])
         checked.append({"group": group, "host": host, "icmp": icmp, "tcp": tcp,
                         "ms": ms, "dns_error": dns_error})
 
@@ -81,7 +88,7 @@ def run() -> Tuple[str, List[str]]:
         else:
             tcp_text = "нет"
         details.append("{:<14} ICMP: {:<4} TCP {}: {}".format(
-            item["host"], "да" if item["icmp"] else "нет", TCP_PORT, tcp_text))
+            item["host"], "да" if item["icmp"] else "нет", port, tcp_text))
 
     any_icmp = any(item["icmp"] for item in checked)
     any_tcp = any(item["tcp"] for item in checked)
