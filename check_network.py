@@ -1,5 +1,7 @@
 """M1. Проверка подключения к интернету.
 
+Отвечает на вопрос: есть ли подключение к интернету (полное или ограниченное).
+
 Узлы делятся на две группы, российские и зарубежные, чтобы отличить полный доступ
 от ограниченного (белые списки мобильных операторов, блокировки). ICMP часто режется,
 поэтому решение принимается по TCP-подключению, а ping выводится только для сведения.
@@ -46,8 +48,8 @@ def tcp_connect(host: str, port: int, timeout_s: float) -> Tuple[bool, int, bool
     return True, int((time.monotonic() - start) * 1000), False
 
 
-def run(cfg: dict) -> Tuple[str, List[str]]:
-    """Выполнить проверку M1. Вернуть (статус, [итог, подробности...]).
+def run(cfg: dict) -> Tuple[str, List[str], List[str]]:
+    """Выполнить проверку M1. Вернуть (статус, краткие строки, подробности).
 
     cfg — секция "network" файла настроек.
     """
@@ -76,7 +78,7 @@ def run(cfg: dict) -> Tuple[str, List[str]]:
         if item["tcp"] and item["group"] == "foreign":
             foreign_ok = True
 
-    # Шаг 8. Подробности по каждому узлу.
+    # Шаг 8. Подробности по каждому узлу (только для -v).
     details = []
     for item in checked:
         if item["dns_error"]:
@@ -96,12 +98,10 @@ def run(cfg: dict) -> Tuple[str, List[str]]:
     # Шаги 5–7. Итоговый статус.
     if not ru_ok and not foreign_ok:
         if all(item["dns_error"] for item in checked):
-            details.append("Не работает разрешение имён (DNS)")
-        return FAIL, ["Нет подключения к интернету"] + details
+            details.append("Не работает DNS: ни одно имя узла не разрешилось")
+        return FAIL, ["нет"], details
     if ru_ok and foreign_ok:
-        return OK, ["Подключение к интернету есть"] + details
+        return OK, ["есть"], details
     if ru_ok:
-        summary = "Доступ к интернету ограничен: доступны только российские узлы"
-    else:
-        summary = "Доступ к интернету ограничен: доступны только зарубежные узлы"
-    return WARNING, [summary] + details
+        return WARNING, ["ограничено (доступны только российские узлы)"], details
+    return WARNING, ["ограничено (доступны только зарубежные узлы)"], details

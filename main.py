@@ -38,8 +38,8 @@ import check_antivirus  # noqa: E402
 import check_firewall  # noqa: E402
 import check_network  # noqa: E402
 import check_presence  # noqa: E402
-from common import (APP_NAME, APP_VERSION, BRIEF_PREFIX, DEFAULT_CONFIG_PATH,  # noqa: E402
-                    ERROR, FAIL, INCONCLUSIVE, NOT_RUN, OK, WARNING, is_root, load_config,
+from common import (APP_NAME, APP_VERSION, DEFAULT_CONFIG_PATH, ERROR, FAIL,  # noqa: E402
+                    INCONCLUSIVE, NOT_RUN, OK, WARNING, is_root, load_config,
                     os_info)
 
 # Файл продуктов по умолчанию: products.json в каталоге, где лежит main.py.
@@ -57,38 +57,43 @@ config_path = ""
 products = []  # type: List[dict]
 products_path = ""
 
-# Подробный вывод (флаг -v). Без него у каждой проверки печатаются только итог
-# и строки с BRIEF_PREFIX (у M2 — найденные продукты).
+# Подробный вывод (флаг -v). Без него у каждой проверки печатаются только краткие строки
+# (итог, найденные продукты в M2, подсказки при не-OK), с ним — ещё и подробности.
 verbose = False
+
+# Тип результата проверки: (статус, краткие строки, подробности).
+# Краткие строки: [результат, строки под итогом...]; подробности печатаются только с -v.
+Result = Tuple[str, List[str], List[str]]
 
 
 # Каждая проверка получает свою секцию настроек. Функции ниже нужны, чтобы
 # в CHECKS все проверки вызывались одинаково — без аргументов.
 
-def run_network() -> Tuple[str, List[str]]:
+def run_network() -> Result:
     """Запустить M1 с секцией "network"."""
     return check_network.run(config["network"])
 
 
-def run_presence() -> Tuple[str, List[str]]:
+def run_presence() -> Result:
     """Запустить M2 с секцией "presence" и загруженным списком продуктов."""
     return check_presence.run(config["presence"], products)
 
 
-def run_firewall() -> Tuple[str, List[str]]:
+def run_firewall() -> Result:
     """Запустить M3 с секцией "firewall_test"."""
     return check_firewall.run(config["firewall_test"])
 
 
-def run_antivirus() -> Tuple[str, List[str]]:
+def run_antivirus() -> Result:
     """Запустить M4 с секцией "antivirus_test"."""
     return check_antivirus.run(config["antivirus_test"])
 
 
 # Проверки по порядку: (идентификатор, название, функция без аргументов).
+# Название одно и то же в меню, в строке результата и в отчёте.
 CHECKS = [
     ("M1", "Подключение к интернету", run_network),
-    ("M2", "Наличие МЭ и АВ", run_presence),
+    ("M2", "Наличие АВ и МЭ", run_presence),
     ("M3", "Работоспособность МЭ", run_firewall),
     ("M4", "Работоспособность АВ", run_antivirus),
 ]
@@ -103,32 +108,39 @@ STATUS_LABELS = {
     ERROR: "[ ERR  ]",
 }
 
-MENU = """
-  1  Проверка подключения к интернету
-  2  Проверка наличия МЭ и АВ
-  3  Проверка работоспособности МЭ
-  4  Проверка работоспособности АВ
-  5  Выполнить все проверки
-  6  Вывести отчёт
-  0  Выход
-"""
-
 # Код возврата при Ctrl+C (128 + номер сигнала SIGINT), принятый в Linux.
 EXIT_INTERRUPTED = 130
 
-# Результаты проверок: идентификатор -> (статус, [итог, подробности...]).
-results = {}  # type: Dict[str, Tuple[str, List[str]]]
+# Результаты проверок: идентификатор -> (статус, краткие строки, подробности).
+results = {}  # type: Dict[str, Result]
+
+# Отступ строк под итогом: ширина метки статуса и идентификатора («[  OK  ] M1  »).
+INDENT = " " * 9
 
 
-def print_result(check_id: str, status: str, lines: List[str]) -> None:
-    """Напечатать результат проверки: метка, итог, затем подробности с отступом.
+def build_menu() -> str:
+    """Текст меню. Пункты 1–4 берут названия из CHECKS."""
+    lines = [""]
+    for number, (_check_id, title, _function) in enumerate(CHECKS, start=1):
+        lines.append("  {}  {}".format(number, title))
+    lines.append("  5  Выполнить все проверки")
+    lines.append("  6  Вывести отчёт")
+    lines.append("  0  Выход")
+    lines.append("")
+    return "\n".join(lines)
 
-    Без флага -v из подробностей печатаются только строки, начинающиеся с BRIEF_PREFIX.
+
+def print_result(check_id: str, title: str, result: Result) -> None:
+    """Напечатать результат: «метка Mn  Название: результат», под ним краткие строки,
+    с флагом -v — ещё и подробности.
     """
-    print("{} {}  {}".format(STATUS_LABELS[status], check_id, lines[0]))
-    for line in lines[1:]:
-        if verbose or line.startswith(BRIEF_PREFIX):
-            print("         " + line)
+    status, brief, details = result
+    print("{} {}  {}: {}".format(STATUS_LABELS[status], check_id, title, brief[0]))
+    for line in brief[1:]:
+        print(INDENT + line)
+    if verbose:
+        for line in details:
+            print(INDENT + line)
 
 
 def run_check(index: int) -> None:
@@ -140,21 +152,17 @@ def run_check(index: int) -> None:
     check_id, title, function = CHECKS[index]
     print("Выполняется {}: {}…".format(check_id, title))
     try:
-        status, lines = function()
+        result = function()
     except Exception as exc:
-        status = ERROR
-        lines = ["Сбой программы при выполнении проверки",
-                 "{}: {}".format(type(exc).__name__, exc)]
-    results[check_id] = (status, lines)
-    print_result(check_id, status, lines)
+        result = (ERROR, ["ошибка проверки ({}: {})".format(type(exc).__name__, exc)], [])
+    results[check_id] = result
+    print_result(check_id, title, result)
     print()
 
 
 def print_report() -> None:
-    """M5. Вывести отчёт: заголовок, итог по каждой проверке, затем подробности.
-
-    Без флага -v раздела «Подробности» нет: под итогом печатаются только строки
-    с BRIEF_PREFIX (у M2 — найденные продукты).
+    """M5. Вывести отчёт: заголовок, затем результат каждой проверки в том же виде,
+    что и при её запуске (с -v — вместе с подробностями).
     """
     print()
     print("Результаты тестирования средств защиты")
@@ -168,43 +176,26 @@ def print_report() -> None:
     print()
 
     # Проверка, которой нет в results, показывается как NOT_RUN.
-    report = []
     for check_id, title, _function in CHECKS:
         if check_id in results:
-            status, lines = results[check_id]
+            result = results[check_id]
         else:
-            status, lines = NOT_RUN, [title + ": не выполнялась"]
-        report.append((check_id, title, status, lines))
-
-    for number, (check_id, title, status, lines) in enumerate(report, start=1):
-        print("{}. {} {}".format(number, STATUS_LABELS[status], lines[0]))
-        if not verbose:
-            for line in lines[1:]:
-                if line.startswith(BRIEF_PREFIX):
-                    print("            " + line)
-
-    if not verbose:
-        print()
-        return
-    print()
-    print("Подробности")
-    for check_id, title, status, lines in report:
-        print()
-        print_result(check_id, status, lines)
+            result = (NOT_RUN, ["не выполнялась"], [])
+        print_result(check_id, title, result)
     print()
 
 
 def print_root_warning() -> None:
     """Без прав root предупредить, какие проверки будут ограничены."""
     if not is_root():
-        print("Внимание: нет прав root. Ограничена проверка M2: правила МЭ "
+        print("Внимание: нет прав root. Ограничена проверка M3: правила МЭ "
               "(nft, iptables) не будут прочитаны.")
 
 
 def menu() -> None:
     """Интерактивное меню. Возвращается при выборе 0 или конце ввода (Ctrl+D)."""
     while True:
-        print(MENU)
+        print(build_menu())
         try:
             choice = input("Выберите пункт: ").strip()
         except EOFError:

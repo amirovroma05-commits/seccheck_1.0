@@ -1,7 +1,11 @@
 """M4. Проверка работоспособности антивируса (АВ).
 
+Отвечает на вопрос: реагирует ли резидентная защита АВ на тестовый файл.
+
 Программа создаёт тестовый файл EICAR и ждёт реакции резидентной защиты (on-access).
 Засчитываются три вида реакции: запрет записи, удаление файла (карантин), запрет чтения.
+Реакцией считается только PermissionError (EACCES или EPERM); другие ошибки ввода-вывода
+(нет каталога, нет места на диске) дают статус ERROR.
 
 Строка EICAR хранится только частями и склеивается при выполнении: если записать её
 в исходник целиком, антивирус удалит саму программу.
@@ -51,11 +55,22 @@ def clear_progress() -> None:
         print("\r" + " " * 40 + "\r", end="", flush=True)
 
 
+def os_error_text(exc: OSError) -> str:
+    """Краткое описание ошибки ввода-вывода для итоговой строки."""
+    return exc.strerror or str(exc)
+
+
+def detected(elapsed: float, how: str) -> str:
+    """Итог при реакции АВ: «тестовый файл обнаружен за N с (как)»."""
+    return "тестовый файл обнаружен за {:.0f} с ({})".format(elapsed, how)
+
+
 def write_and_wait(path: str, content: str, timeout_s: float,
                    interval_s: float) -> Tuple[str, str]:
     """Шаги 3–9. Записать файл и ждать реакции АВ не дольше timeout_s, проверяя файл
-    каждые interval_s секунд. Вернуть (статус, итог).
+    каждые interval_s секунд. Вернуть (статус, результат).
     """
+    start = time.monotonic()
     # Шаг 3. Многие АВ проверяют файл при закрытии после записи, поэтому
     # данные сбрасываются на диск (flush, fsync) до закрытия файла.
     try:
@@ -64,13 +79,12 @@ def write_and_wait(path: str, content: str, timeout_s: float,
             test_file.flush()
             os.fsync(test_file.fileno())
     except PermissionError:
-        # Шаг 4.
-        return OK, "АВ работает: запись тестового файла заблокирована"
+        # Шаг 4. PermissionError — это EACCES или EPERM: запись запретил АВ.
+        return OK, detected(time.monotonic() - start, "запись заблокирована")
     except OSError as exc:
-        # Другие ошибки (нет места, сбой диска) реакцией АВ не считаются.
-        return ERROR, "Не удалось записать тестовый файл: {}".format(exc)
+        # Другие ошибки (нет каталога, нет места) реакцией АВ не считаются.
+        return ERROR, "ошибка проверки (запись тестового файла: {})".format(os_error_text(exc))
 
-    start = time.monotonic()
     while True:
         # Шаг 5.
         time.sleep(interval_s)
@@ -79,28 +93,28 @@ def write_and_wait(path: str, content: str, timeout_s: float,
 
         # Шаг 6.
         if not os.path.exists(path):
-            return OK, "АВ работает: файл удалён или помещён в карантин через {:.0f} с".format(
-                elapsed)
+            return OK, detected(elapsed, "файл удалён")
 
         # Шаг 7.
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as test_file:
                 test_file.read()
         except PermissionError:
-            return OK, "АВ работает: доступ к файлу заблокирован через {:.0f} с".format(
-                elapsed)
+            return OK, detected(elapsed, "доступ к файлу заблокирован")
         except FileNotFoundError:
             # Файл удалили между шагами 6 и 7.
-            return OK, "АВ работает: файл удалён или помещён в карантин через {:.0f} с".format(
-                elapsed)
+            return OK, detected(elapsed, "файл удалён")
+        except OSError as exc:
+            return ERROR, "ошибка проверки (чтение тестового файла: {})".format(
+                os_error_text(exc))
 
         # Шаги 8–9.
         if elapsed >= timeout_s:
-            return FAIL, "Резидентная защита не среагировала за {} с".format(timeout_s)
+            return FAIL, "тестовый файл не обнаружен за {} с".format(timeout_s)
 
 
-def run(cfg: dict) -> Tuple[str, List[str]]:
-    """Выполнить проверку M4. Вернуть (статус, [итог, подробности...]).
+def run(cfg: dict) -> Tuple[str, List[str], List[str]]:
+    """Выполнить проверку M4. Вернуть (статус, краткие строки, подробности).
 
     cfg — секция "antivirus_test" файла настроек.
     """
@@ -108,13 +122,20 @@ def run(cfg: dict) -> Tuple[str, List[str]]:
     # Шаг 2. Создать собственный подкаталог: внутри eicar_dir или, если он null,
     # в системном временном каталоге (dir=None). mkdtemp создаёт каталог с уникальным
     # именем и правами 700, поэтому чужой файл или ссылку на его месте подложить нельзя.
-    tmp_dir = tempfile.mkdtemp(prefix="seccheck_", dir=cfg["eicar_dir"])
+    try:
+        tmp_dir = tempfile.mkdtemp(prefix="seccheck_", dir=cfg["eicar_dir"])
+    except OSError as exc:
+        return ERROR, ["ошибка проверки (создание каталога: {})".format(
+            os_error_text(exc))], []
     path = os.path.join(tmp_dir, FILE_NAME)
     details = ["Тестовый файл: " + path]
+    # Предупреждения о неудалённом файле или каталоге печатаются всегда, а не только с -v:
+    # на диске остался тестовый файл, пользователь должен об этом знать.
+    warnings = []
 
     try:
-        status, summary = write_and_wait(path, content, cfg["eicar_timeout_s"],
-                                         cfg["poll_interval_s"])
+        status, result = write_and_wait(path, content, cfg["eicar_timeout_s"],
+                                        cfg["poll_interval_s"])
     finally:
         # Шаг 10. Удалить свой файл и свой подкаталог в любом случае, в том числе после
         # Ctrl+C. os.rmdir удаляет только пустой каталог, а сам eicar_dir и всё прочее
@@ -122,19 +143,24 @@ def run(cfg: dict) -> Tuple[str, List[str]]:
         clear_progress()
         try:
             os.remove(path)
+            details.append("Тестовый файл удалён программой")
         except FileNotFoundError:
-            pass
+            details.append("Тестовый файл к моменту удаления уже отсутствовал")
         except OSError as exc:
-            details.append("Внимание: не удалось удалить {}: {}".format(path, exc))
+            warnings.append("Внимание: не удалось удалить {}: {}".format(
+                path, os_error_text(exc)))
         try:
             os.rmdir(tmp_dir)
         except OSError as exc:
-            details.append("Внимание: не удалось удалить каталог {}: {}".format(tmp_dir, exc))
+            warnings.append("Внимание: не удалось удалить каталог {}: {}".format(
+                tmp_dir, os_error_text(exc)))
 
+    brief = [result]
     if status == FAIL:
-        # Подсказки по частым причинам отказа для ClamAV (clamd.conf).
+        # Шаг 11. Подсказка; подробные причины для ClamAV (clamd.conf) — только с -v.
+        brief.append("Проверьте, что включена постоянная защита (для ClamAV — clamonacc)")
         details.append("ClamAV: каталог {} должен входить в OnAccessIncludePath".format(
             os.path.dirname(tmp_dir)))
         details.append("ClamAV: доступ блокируется только при OnAccessPrevention yes")
         details.append("ClamAV: служба clamonacc должна быть запущена")
-    return status, [summary] + details
+    return status, brief + warnings, details
