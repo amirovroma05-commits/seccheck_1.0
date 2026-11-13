@@ -26,13 +26,37 @@ BRIEF_PREFIX = "• "
 CMD_NOT_FOUND = -1             # программы нет в системе
 CMD_TIMEOUT = -2               # команда не завершилась за отведённое время
 
-# Команды, выводящие правила netfilter (используются в M2 и M3). Правила iptables-legacy
+# Запрещающие правила в выводе `iptables -S` (и `iptables-legacy -S`): политика цепочки
+# DROP или правило с действием DROP/REJECT. Вывод iptables всегда в верхнем регистре.
+# Ищутся именно действия: имена цепочек вроде «ufw-reject-output» есть и при выключенном
+# ufw, поэтому простой поиск слов drop/reject в тексте давал ложное срабатывание.
+IPTABLES_DENY_PATTERNS = [
+    r"^-P\s+(INPUT|OUTPUT|FORWARD)\s+DROP\b",  # -P OUTPUT DROP
+    r"\s-j\s+(DROP|REJECT)\b",                  # -A ... -j DROP
+]
+
+# Запрещающие правила в выводе `nft list ruleset` (без учёта регистра): политика цепочки
+# drop или действие drop/reject отдельным словом. Слово должно быть отделено пробелами
+# (или стоять перед «;»/концом строки), поэтому «jump ufw-reject-output» не подходит.
+NFT_DENY_PATTERNS = [
+    r"\bpolicy\s+drop\b",                       # policy drop;
+    r"(^|\s)(drop|reject)(\s|;|$)",              # tcp dport 80 counter drop
+]
+
+# Команды, выводящие правила netfilter (используются в M2 и M3), и шаблоны запрещающих
+# строк для каждой: (команда, шаблоны, искать без учёта регистра). Правила iptables-legacy
 # не видны через nft, поэтому смотрим все источники.
 NETFILTER_COMMANDS = [
-    ["nft", "list", "ruleset"],
-    ["iptables", "-S"],
-    ["iptables-legacy", "-S"],
+    (["nft", "list", "ruleset"], NFT_DENY_PATTERNS, True),
+    (["iptables", "-S"], IPTABLES_DENY_PATTERNS, False),
+    (["iptables-legacy", "-S"], IPTABLES_DENY_PATTERNS, False),
 ]
+
+# Сколько найденных запрещающих строк показывать в подробностях.
+MAX_SHOWN_DENY_LINES = 5
+
+# Ширина строки подробностей: вывод до 100 символов, из них 9 занимает отступ.
+DETAIL_WIDTH = 91
 
 # Файл настроек, если не указан флаг --config.
 DEFAULT_CONFIG_PATH = "/etc/seccheck/config.json"
@@ -104,18 +128,54 @@ def run_cmd(cmd: List[str], timeout: float) -> Tuple[int, str, str]:
     return completed.returncode, stdout, stderr
 
 
+def is_deny_line(line: str, patterns: List[str], ignore_case: bool) -> bool:
+    """Подходит ли строка вывода правил хотя бы под один шаблон запрещающего правила."""
+    flags = re.IGNORECASE if ignore_case else 0
+    for pattern in patterns:
+        if re.search(pattern, line, flags) is not None:
+            return True
+    return False
+
+
+def legacy_tables_in_use(timeout_s: float) -> bool:
+    """Используются ли legacy-таблицы iptables.
+
+    Да, если `iptables -V` сообщает «(legacy)» или модуль ядра ip_tables уже загружен
+    (строка ip_tables в /proc/modules). Иначе `iptables-legacy -S` запускать нельзя:
+    сам вызов загрузил бы модуль и создал таблицы в ядре, а программа ничего не меняет
+    в системе.
+    """
+    code, stdout, _stderr = run_cmd(["iptables", "-V"], timeout=timeout_s)
+    if code == 0 and "(legacy)" in stdout:
+        return True
+    try:
+        with open("/proc/modules", "r", encoding="utf-8", errors="replace") as modules:
+            for line in modules:
+                # Строка файла: «ip_tables 32768 0 - Live 0x...», первое слово — имя модуля.
+                if line.split(" ", 1)[0] == "ip_tables":
+                    return True
+    except OSError:
+        pass
+    return False
+
+
 def check_netfilter(timeout_s: float) -> Tuple[bool, List[str], bool]:
     """Проверить, есть ли запрещающие правила netfilter (шаг 1 в M2 и в M3).
 
     Вернуть (фильтрация включена, подробности, удалось ли прочитать хоть один источник).
-    Фильтрация считается включённой, если в выводе есть drop или reject
-    (без учёта регистра).
+    Фильтрация считается включённой, если хотя бы одна строка вывода правил подходит под
+    шаблоны IPTABLES_DENY_PATTERNS или NFT_DENY_PATTERNS. Первые MAX_SHOWN_DENY_LINES
+    найденных строк попадают в подробности, чтобы было видно, на что сработала проверка.
     """
-    filtering = False
     any_read = False
     details = []
-    for cmd in NETFILTER_COMMANDS:
+    deny_lines = []  # найденные запрещающие строки: «команда: строка»
+    for cmd, patterns, ignore_case in NETFILTER_COMMANDS:
         command_text = " ".join(cmd)
+        if cmd[0] == "iptables-legacy" and not legacy_tables_in_use(timeout_s):
+            details.append("{}: не выполнялась (legacy-таблицы не используются)".format(
+                command_text))
+            continue
         code, stdout, stderr = run_cmd(cmd, timeout=timeout_s)
         if code == CMD_NOT_FOUND:
             details.append("{}: утилита не установлена".format(command_text))
@@ -133,13 +193,28 @@ def check_netfilter(timeout_s: float) -> Tuple[bool, List[str], bool]:
             details.append("{}: не выполнена ({})".format(command_text, reason))
             continue
         any_read = True
-        text = stdout.lower()
-        if "drop" in text or "reject" in text:
-            filtering = True
-            details.append("{}: есть запрещающие правила (drop/reject)".format(command_text))
+        found = 0
+        for line in stdout.splitlines():
+            if is_deny_line(line, patterns, ignore_case):
+                found += 1
+                deny_lines.append("{}: {}".format(command_text, line.strip()))
+        if found > 0:
+            details.append("{}: запрещающих правил: {}".format(command_text, found))
         else:
             details.append("{}: запрещающих правил нет".format(command_text))
-    return filtering, details, any_read
+
+    if len(deny_lines) > MAX_SHOWN_DENY_LINES:
+        details.append("Запрещающие правила (первые {} из {}):".format(
+            MAX_SHOWN_DENY_LINES, len(deny_lines)))
+    elif deny_lines:
+        details.append("Запрещающие правила:")
+    if deny_lines:
+        for line in deny_lines[:MAX_SHOWN_DENY_LINES]:
+            line = "  " + line
+            if len(line) > DETAIL_WIDTH:
+                line = line[:DETAIL_WIDTH - 3] + "..."
+            details.append(line)
+    return len(deny_lines) > 0, details, any_read
 
 
 def is_root() -> bool:

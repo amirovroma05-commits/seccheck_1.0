@@ -72,7 +72,8 @@ def run(cfg: dict) -> Tuple[str, List[str]]:
     if not netfilter_read:
         # Например, нет прав root: проверка идёт дальше, но без этого вывода.
         details.append("Наличие запрещающих правил не проверено: правила netfilter не прочитаны")
-        details.extend(netfilter_details)
+    # Причины, по которым источники не прочитаны, или найденные запрещающие строки.
+    details.extend(netfilter_details)
 
     # Шаг 2. Разрешить имя в IPv4 один раз.
     try:
