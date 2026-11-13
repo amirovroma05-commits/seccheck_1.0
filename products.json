@@ -27,8 +27,8 @@
       "services": ["drweb-configd"],
       "files": ["/opt/drweb.com/bin/drweb-ctl"],
       "protection_service": null,
-      "verified": false,
-      "notes": "Имена взяты из документации производителя, на стенде не проверены"
+      "verified": true,
+      "notes": "служба drweb-configd и файл drweb-ctl подтверждены на Ubuntu 24.04"
     },
     {
       "id": "kesl",

@@ -38,8 +38,8 @@ import check_antivirus  # noqa: E402
 import check_firewall  # noqa: E402
 import check_network  # noqa: E402
 import check_presence  # noqa: E402
-from common import (APP_NAME, APP_VERSION, DEFAULT_CONFIG_PATH, ERROR,  # noqa: E402
-                    FAIL, INCONCLUSIVE, NOT_RUN, OK, WARNING, is_root, load_config,
+from common import (APP_NAME, APP_VERSION, BRIEF_PREFIX, DEFAULT_CONFIG_PATH,  # noqa: E402
+                    ERROR, FAIL, INCONCLUSIVE, NOT_RUN, OK, WARNING, is_root, load_config,
                     os_info)
 
 # Файл продуктов по умолчанию: products.json в каталоге, где лежит main.py.
@@ -56,6 +56,10 @@ config = {}  # type: Dict[str, dict]
 config_path = ""
 products = []  # type: List[dict]
 products_path = ""
+
+# Подробный вывод (флаг -v). Без него у каждой проверки печатаются только итог
+# и строки с BRIEF_PREFIX (у M2 — найденные продукты).
+verbose = False
 
 
 # Каждая проверка получает свою секцию настроек. Функции ниже нужны, чтобы
@@ -117,10 +121,14 @@ results = {}  # type: Dict[str, Tuple[str, List[str]]]
 
 
 def print_result(check_id: str, status: str, lines: List[str]) -> None:
-    """Напечатать результат проверки: метка, итог, затем подробности с отступом."""
+    """Напечатать результат проверки: метка, итог, затем подробности с отступом.
+
+    Без флага -v из подробностей печатаются только строки, начинающиеся с BRIEF_PREFIX.
+    """
     print("{} {}  {}".format(STATUS_LABELS[status], check_id, lines[0]))
     for line in lines[1:]:
-        print("         " + line)
+        if verbose or line.startswith(BRIEF_PREFIX):
+            print("         " + line)
 
 
 def run_check(index: int) -> None:
@@ -143,7 +151,11 @@ def run_check(index: int) -> None:
 
 
 def print_report() -> None:
-    """M5. Вывести отчёт: заголовок, итог по каждой проверке, затем подробности."""
+    """M5. Вывести отчёт: заголовок, итог по каждой проверке, затем подробности.
+
+    Без флага -v раздела «Подробности» нет: под итогом печатаются только строки
+    с BRIEF_PREFIX (у M2 — найденные продукты).
+    """
     print()
     print("Результаты тестирования средств защиты")
     print("{} {} · {}".format(APP_NAME, APP_VERSION,
@@ -166,7 +178,14 @@ def print_report() -> None:
 
     for number, (check_id, title, status, lines) in enumerate(report, start=1):
         print("{}. {} {}".format(number, STATUS_LABELS[status], lines[0]))
+        if not verbose:
+            for line in lines[1:]:
+                if line.startswith(BRIEF_PREFIX):
+                    print("            " + line)
 
+    if not verbose:
+        print()
+        return
     print()
     print("Подробности")
     for check_id, title, status, lines in report:
@@ -217,11 +236,14 @@ def main() -> int:
     parser.add_argument("--products", metavar="PATH", default=DEFAULT_PRODUCTS_PATH,
                         help="файл со списком продуктов для M2 "
                              "(по умолчанию products.json рядом с main.py)")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="подробный вывод: признаки, команды, время подключений")
     args = parser.parse_args()
 
     # Настройки и список продуктов загружаются один раз до показа меню.
     # Нет файла или в нём ошибка — программа не запускается.
-    global config, config_path, products, products_path
+    global config, config_path, products, products_path, verbose
+    verbose = args.verbose
     config_path = os.path.abspath(args.config)
     try:
         config = load_config(config_path)

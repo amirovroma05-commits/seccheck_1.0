@@ -16,7 +16,7 @@ import re
 from collections import OrderedDict
 from typing import List, Tuple
 
-from common import CMD_NOT_FOUND, FAIL, OK, WARNING, is_root, run_cmd
+from common import BRIEF_PREFIX, FAIL, OK, WARNING, check_netfilter, is_root, run_cmd
 
 # Настройки берутся из секции "presence" файла настроек (см. README.md, «Настройки»):
 #   cmd_timeout_s — таймаут одной внешней команды (systemctl, nft, iptables), с.
@@ -30,7 +30,7 @@ ACTIVE = 3             # подтверждено, что защита вклю�
 LEVEL_NAMES = {
     NOT_FOUND: "не найден",
     INSTALLED: "установлен",
-    RUNNING: "работает",
+    RUNNING: "служба запущена",
     ACTIVE: "защита активна",
 }
 
@@ -42,7 +42,7 @@ LEVEL_NAMES = {
 #   files               — файлы: любой существующий -> INSTALLED;
 #   protection_service  — служба резидентной защиты АВ: активна -> ACTIVE;
 #   active_if_filtering — ACTIVE, если служба продукта активна и netfilter фильтрует;
-#   verified            — профиль проверен на стенде;
+#   verified            — имена служб и пути проверены на реальной системе;
 #   notes               — примечание (в отчёт не выводится).
 # Без protection_service и active_if_filtering максимальный уровень продукта — RUNNING.
 # OrderedDict: в Python 3.5 обычный словарь не сохраняет порядок, а от порядка зависит,
@@ -65,15 +65,6 @@ KNOWN_KINDS = ["antivirus", "firewall"]
 # не может начинаться с «-» и не будет принято systemctl за ключ командной строки.
 # Используется re.fullmatch: «$» в re.match пропустил бы перевод строки в конце имени.
 SERVICE_NAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9@._-]*"
-
-# Команды, выводящие правила netfilter. Правила iptables-legacy не видны через nft,
-# поэтому смотрим все источники.
-NETFILTER_COMMANDS = [
-    ["nft", "list", "ruleset"],
-    ["iptables", "-S"],
-    ["iptables-legacy", "-S"],
-]
-
 
 def show(value: object) -> str:
     """Значение из файла для сообщения об ошибке.
@@ -216,44 +207,6 @@ def service_active(name: str, timeout_s: float) -> bool:
     return code == 0 and stdout.strip() == "active"
 
 
-def check_netfilter(timeout_s: float) -> Tuple[bool, List[str], bool]:
-    """Шаг 1. Проверить правила netfilter.
-
-    Вернуть (фильтрация включена, подробности, удалось ли прочитать хоть один источник).
-    Фильтрация считается включённой, если в выводе есть drop или reject
-    (без учёта регистра).
-    """
-    filtering = False
-    any_read = False
-    details = []
-    for cmd in NETFILTER_COMMANDS:
-        command_text = " ".join(cmd)
-        code, stdout, stderr = run_cmd(cmd, timeout=timeout_s)
-        if code == CMD_NOT_FOUND:
-            details.append("{}: утилита не установлена".format(command_text))
-            continue
-        if code != 0:
-            # Для подробностей берём первую строку сообщения об ошибке, а если её нет —
-            # код возврата. Длинное сообщение обрезаем: ширина отчёта до 100 символов.
-            lines = stderr.strip().splitlines()
-            if lines:
-                reason = lines[0]
-            else:
-                reason = "код " + str(code)
-            if len(reason) > 50:
-                reason = reason[:47] + "..."
-            details.append("{}: не выполнена ({})".format(command_text, reason))
-            continue
-        any_read = True
-        text = stdout.lower()
-        if "drop" in text or "reject" in text:
-            filtering = True
-            details.append("{}: есть запрещающие правила (drop/reject)".format(command_text))
-        else:
-            details.append("{}: запрещающих правил нет".format(command_text))
-    return filtering, details, any_read
-
-
 def detect_product(product: dict, timeout_s: float) -> Tuple[int, List[str]]:
     """Шаг 3. Определить уровень продукта по файлам и службам. Вернуть (уровень, признаки)."""
     level = NOT_FOUND
@@ -280,11 +233,17 @@ def run(cfg: dict, products: List[dict]) -> Tuple[str, List[str]]:
     filtering, netfilter_details, netfilter_read = check_netfilter(timeout_s)
 
     found = []  # список (продукт, уровень)
+    brief = []  # строки найденных продуктов для краткого вывода
     details = []
     # Шаги 2–6. Перебор продуктов.
     for product in products:
         level, evidence = detect_product(product, timeout_s)
         if level == NOT_FOUND:
+            # Непроверенный профиль может не найти продукт из-за неверных имён служб
+            # и путей, поэтому только здесь пометка о том, что профиль не проверен.
+            if not product["verified"]:
+                details.append("{}: не найден (профиль не проверен на стенде)".format(
+                    product["name"]))
             continue
         # Шаг 5. Проверка активности защиты.
         protection = product["protection_service"]
@@ -295,10 +254,10 @@ def run(cfg: dict, products: List[dict]) -> Tuple[str, List[str]]:
             level = ACTIVE
             evidence.append("netfilter фильтрует трафик")
         found.append((product, level))
-        line = "{}: {} ({})".format(product["name"], LEVEL_NAMES[level], ", ".join(evidence))
-        if not product["verified"]:
-            line += " (профиль не проверен на стенде)"
-        details.append(line)
+        # Найденный продукт подтверждает свои имена на этой системе, поэтому пометки
+        # «профиль не проверен» у него нет.
+        brief.append("{}{} — {}".format(BRIEF_PREFIX, product["name"], LEVEL_NAMES[level]))
+        details.append("{}: {}".format(product["name"], ", ".join(evidence)))
 
     details.extend(netfilter_details)
     if not netfilter_read and not is_root():
@@ -319,14 +278,13 @@ def run(cfg: dict, products: List[dict]) -> Tuple[str, List[str]]:
             if level == ACTIVE:
                 fw_active = True
 
-    summary_parts = []
-    for product, level in found:
-        summary_parts.append("{} — {}".format(product["name"], LEVEL_NAMES[level]))
-    if filtering:
-        summary_parts.append("фильтрация netfilter включена")
-
+    # Краткие строки продуктов идут первыми, за ними подробности.
+    details = brief + details
     if av_active and (fw_active or filtering):
-        return OK, ["МЭ и АВ: " + "; ".join(summary_parts)] + details
+        summary = "МЭ и АВ обнаружены, защита активна"
+        if filtering:
+            summary += "; фильтрация netfilter включена"
+        return OK, [summary] + details
     if not av_present and not fw_present and not filtering:
         return FAIL, ["МЭ и АВ не обнаружены, фильтрации netfilter нет"] + details
 

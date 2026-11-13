@@ -18,9 +18,21 @@ INCONCLUSIVE = "INCONCLUSIVE"  # вывод сделать нельзя (нет 
 NOT_RUN = "NOT_RUN"            # проверку не запускали
 ERROR = "ERROR"                # сбой программы или нехватка прав
 
+# Строки подробностей, начинающиеся с этого префикса, печатаются и в кратком выводе
+# (без флага -v). Остальные подробности видны только с -v.
+BRIEF_PREFIX = "• "
+
 # Особые коды возврата run_cmd(), когда команда вообще не выполнилась.
 CMD_NOT_FOUND = -1             # программы нет в системе
 CMD_TIMEOUT = -2               # команда не завершилась за отведённое время
+
+# Команды, выводящие правила netfilter (используются в M2 и M3). Правила iptables-legacy
+# не видны через nft, поэтому смотрим все источники.
+NETFILTER_COMMANDS = [
+    ["nft", "list", "ruleset"],
+    ["iptables", "-S"],
+    ["iptables-legacy", "-S"],
+]
 
 # Файл настроек, если не указан флаг --config.
 DEFAULT_CONFIG_PATH = "/etc/seccheck/config.json"
@@ -90,6 +102,44 @@ def run_cmd(cmd: List[str], timeout: float) -> Tuple[int, str, str]:
     stdout = completed.stdout.decode("utf-8", "replace")
     stderr = completed.stderr.decode("utf-8", "replace")
     return completed.returncode, stdout, stderr
+
+
+def check_netfilter(timeout_s: float) -> Tuple[bool, List[str], bool]:
+    """Проверить, есть ли запрещающие правила netfilter (шаг 1 в M2 и в M3).
+
+    Вернуть (фильтрация включена, подробности, удалось ли прочитать хоть один источник).
+    Фильтрация считается включённой, если в выводе есть drop или reject
+    (без учёта регистра).
+    """
+    filtering = False
+    any_read = False
+    details = []
+    for cmd in NETFILTER_COMMANDS:
+        command_text = " ".join(cmd)
+        code, stdout, stderr = run_cmd(cmd, timeout=timeout_s)
+        if code == CMD_NOT_FOUND:
+            details.append("{}: утилита не установлена".format(command_text))
+            continue
+        if code != 0:
+            # Для подробностей берём первую строку сообщения об ошибке, а если её нет —
+            # код возврата. Длинное сообщение обрезаем: ширина отчёта до 100 символов.
+            lines = stderr.strip().splitlines()
+            if lines:
+                reason = lines[0]
+            else:
+                reason = "код " + str(code)
+            if len(reason) > 50:
+                reason = reason[:47] + "..."
+            details.append("{}: не выполнена ({})".format(command_text, reason))
+            continue
+        any_read = True
+        text = stdout.lower()
+        if "drop" in text or "reject" in text:
+            filtering = True
+            details.append("{}: есть запрещающие правила (drop/reject)".format(command_text))
+        else:
+            details.append("{}: запрещающих правил нет".format(command_text))
+    return filtering, details, any_read
 
 
 def is_root() -> bool:
