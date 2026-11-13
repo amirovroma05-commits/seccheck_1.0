@@ -5,14 +5,27 @@
 Запуск: `sudo ./main.py` или, после установки, `sudo seccheck`.
 """
 
-from __future__ import annotations
-
 import sys
 
 # Не создавать каталоги __pycache__: при запуске через sudo они принадлежали бы root.
 # Флаг должен быть установлен до импорта модулей проекта, поэтому импорты ниже
 # стоят не в начале файла.
 sys.dont_write_bytecode = True
+
+import codecs  # noqa: E402
+import io  # noqa: E402
+
+# Весь вывод программы на русском. При локали C/POSIX (sudo, cron, ssh с LANG=C)
+# Python 3.5 выбирает для stdout и stderr кодировку ASCII, и первый же print
+# с кириллицей упал бы с UnicodeEncodeError. Поэтому такой поток заново открывается
+# в UTF-8 поверх того же двоичного буфера. Исходные объекты остаются в sys.__stdout__
+# и sys.__stderr__, поэтому их буфер не будет закрыт сборщиком мусора.
+if codecs.lookup(sys.stdout.encoding).name != "utf-8":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace",
+                                  line_buffering=True)
+if codecs.lookup(sys.stderr.encoding).name != "utf-8":
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace",
+                                  line_buffering=True)
 
 import argparse  # noqa: E402
 import os  # noqa: E402
@@ -39,9 +52,9 @@ EXIT_BAD_FILE = 2
 
 # Настройки, список продуктов для M2 и пути к файлам, из которых они загружены.
 # Заполняются один раз в main() до показа меню.
-config: Dict[str, dict] = {}
+config = {}  # type: Dict[str, dict]
 config_path = ""
-products: List[dict] = []
+products = []  # type: List[dict]
 products_path = ""
 
 
@@ -100,7 +113,7 @@ MENU = """
 EXIT_INTERRUPTED = 130
 
 # Результаты проверок: идентификатор -> (статус, [итог, подробности...]).
-results: Dict[str, Tuple[str, List[str]]] = {}
+results = {}  # type: Dict[str, Tuple[str, List[str]]]
 
 
 def print_result(check_id: str, status: str, lines: List[str]) -> None:

@@ -33,15 +33,32 @@ install.sh, uninstall.sh, README.md, docs/SPEC.md
 ## Жёсткие ограничения
 
 - **Платформа:** Linux с systemd. Никакой логики под конкретный дистрибутив. Только консоль.
-- **Python 3.7+.** Запрещено: `:=`, `match`, `f"{x=}"`, позиционные `/` параметры,
-  `dict[str, int]`/`list[str]` вне аннотаций, `functools.cache`, `str.removeprefix`,
-  `zoneinfo`, `tomllib`. В каждом `.py` после docstring стоит
-  `from __future__ import annotations`; в аннотациях используй `typing.List` и т. п.
+- **Python 3.5+** (на стенде 3.5). Запрещено всё, что появилось позже 3.5:
+  - f-строки (3.6) → `str.format()`;
+  - аннотации переменных `x: int = 0` (3.6) → комментарий `x = 0  # type: int`;
+    аннотации параметров и возвращаемых значений функций можно, типы из `typing`;
+  - `from __future__ import annotations`, `dataclasses` (3.7) → обычные словари и функции;
+  - `subprocess.run(capture_output=..., text=..., encoding=..., errors=...)` (3.6–3.7);
+  - подчёркивания в числах `1_000`, передача `pathlib.Path` в `open()`/`os.*`, модуль
+    `secrets` (3.6); а также `:=`, `match`, `functools.cache`, `str.removeprefix`,
+    `zoneinfo`, `tomllib`, `dict[str, int]`/`list[str]`.
+- **Порядок словарей.** В 3.5 `dict` не сохраняет порядок вставки. Где порядок виден
+  пользователю (меню, отчёт, сообщения об ошибках), используй списки или
+  `collections.OrderedDict`, а для JSON — `json.load(..., object_pairs_hook=OrderedDict)`.
+- **Кодировка: всегда UTF-8 явно.** В 3.5 при локали C/POSIX (sudo, cron, ssh с `LANG=C`)
+  кодировка по умолчанию — ASCII, и кириллица роняет программу. Поэтому:
+  - каждый `open()` текстового файла — с `encoding="utf-8"`;
+  - вывод внешних команд читается байтами и декодируется `decode("utf-8", "replace")`
+    (так устроен `run_cmd`), без `universal_newlines`/`text`;
+  - `main.py` сразу после `sys.dont_write_bytecode` переоткрывает `sys.stdout`
+    и `sys.stderr` в UTF-8 (`io.TextIOWrapper(..., errors="replace")`), если их кодировка
+    не UTF-8. Этот блок не удалять.
 - **Только стандартная библиотека.** Никаких psutil, rich, click, colorama.
 - **Программа ничего не меняет в системе.** Не создаёт правила МЭ, не трогает службы.
   Единственное, что она пишет, — тестовый файл EICAR в собственный подкаталог
   (`mkdtemp` внутри `eicar_dir` или системного временного каталога); файл и подкаталог
-  удаляются в `finally`, сам `eicar_dir` и чужие файлы в нём не трогаются. Команды тестового правила МЭ есть только в README.md.
+  удаляются в `finally`, сам `eicar_dir` и чужие файлы в нём не трогаются. Команды
+  тестового правила МЭ есть только в README.md.
 - Строка EICAR **никогда** не хранится целиком: ни в исходниках, ни в документации,
   ни в сообщениях коммитов. Только частями, которые склеиваются при выполнении.
 - Внешние команды вызываются только через `common.run_cmd()`: с таймаутом, с `LC_ALL=C`,
@@ -74,14 +91,20 @@ install.sh, uninstall.sh, README.md, docs/SPEC.md
 
 ## Проверка после изменений
 
-Автоматических тестов нет. После правок:
+Автоматических тестов нет. После **каждого** изменения обязательно:
 
 ```bash
+# совместимость с Python 3.5: вывод должен быть пустым, код выхода 0
+vermin -q -t=3.5- --no-tips --violations .
 for f in *.py; do python3 -m py_compile "$f"; done
-# грамматика Python 3.7 (py_compile проверяет только синтаксис текущей версии):
-python3 -c "import ast,glob; [ast.parse(open(f).read(), f, feature_version=(3,7)) for f in glob.glob('*.py')]"
 ```
 
-убедись, что `config.json` проходит `load_config`, `products.json` — `load_products`,
-и что строка EICAR целиком не встречается ни в одном файле проекта. Проверки на реальной
-системе запускает автор (`sudo ./main.py --config ./config.json`).
+vermin ставится только в среду разработки (`pip install vermin`), в проект не добавляется.
+`py_compile` проверяет синтаксис лишь той версии Python, которой запущен, поэтому одного его
+недостаточно. Если есть Docker, дополнительно:
+`docker run --rm -v "$PWD":/src -w /src python:3.5 python -m py_compile *.py`.
+
+Также убедись, что `config.json` проходит `load_config`, `products.json` — `load_products`
+(в том числе при `LC_ALL=C LANG=C`), и что строка EICAR целиком не встречается ни в одном
+файле проекта. Проверки на реальной системе запускает автор
+(`sudo ./main.py --config ./config.json`).

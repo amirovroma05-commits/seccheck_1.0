@@ -1,8 +1,6 @@
 """Общие константы и функции SecCheck: статусы проверок, запуск команд, сведения о системе,
 загрузка и проверка файла настроек."""
 
-from __future__ import annotations
-
 import json
 import os
 import re
@@ -69,6 +67,10 @@ def run_cmd(cmd: List[str], timeout: float) -> Tuple[int, str, str]:
     Команда запускается без оболочки (shell=True не используется), с таймаутом
     и с LC_ALL=C: вывод утилит локализован, а разбираем мы только английский.
     Если программы нет, код равен CMD_NOT_FOUND, если вышло время — CMD_TIMEOUT.
+
+    Вывод читается как байты и декодируется явно, как UTF-8 с заменой ошибочных байтов.
+    Текстовый режим (universal_newlines=True) декодировал бы по кодировке локали, а при
+    LANG=C в Python 3.5 это ASCII: любой не-ASCII байт в выводе уронил бы программу.
     """
     env = dict(os.environ)
     env["LC_ALL"] = "C"
@@ -77,8 +79,6 @@ def run_cmd(cmd: List[str], timeout: float) -> Tuple[int, str, str]:
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            universal_newlines=True,
-            errors="replace",  # байты не в UTF-8 заменяются, а не роняют программу
             timeout=timeout,
             env=env,
         )
@@ -87,7 +87,9 @@ def run_cmd(cmd: List[str], timeout: float) -> Tuple[int, str, str]:
     except subprocess.TimeoutExpired:
         # subprocess.run сам завершает процесс, у которого вышло время.
         return CMD_TIMEOUT, "", "команда не завершилась за {} с".format(timeout)
-    return completed.returncode, completed.stdout, completed.stderr
+    stdout = completed.stdout.decode("utf-8", "replace")
+    stderr = completed.stderr.decode("utf-8", "replace")
+    return completed.returncode, stdout, stderr
 
 
 def is_root() -> bool:

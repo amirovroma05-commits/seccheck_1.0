@@ -7,8 +7,6 @@
 в исходник целиком, антивирус удалит саму программу.
 """
 
-from __future__ import annotations
-
 import os
 import sys
 import tempfile
@@ -61,7 +59,7 @@ def write_and_wait(path: str, content: str, timeout_s: float,
     # Шаг 3. Многие АВ проверяют файл при закрытии после записи, поэтому
     # данные сбрасываются на диск (flush, fsync) до закрытия файла.
     try:
-        with open(path, "w", encoding="ascii") as test_file:
+        with open(path, "w", encoding="utf-8") as test_file:
             test_file.write(content)
             test_file.flush()
             os.fsync(test_file.fileno())
@@ -86,7 +84,7 @@ def write_and_wait(path: str, content: str, timeout_s: float,
 
         # Шаг 7.
         try:
-            with open(path, "r", encoding="ascii", errors="replace") as test_file:
+            with open(path, "r", encoding="utf-8", errors="replace") as test_file:
                 test_file.read()
         except PermissionError:
             return OK, "АВ работает: доступ к файлу заблокирован через {:.0f} с".format(

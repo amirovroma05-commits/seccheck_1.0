@@ -10,11 +10,10 @@
 пути проверяются только через os.path.exists.
 """
 
-from __future__ import annotations
-
 import json
 import os
 import re
+from collections import OrderedDict
 from typing import List, Tuple
 
 from common import CMD_NOT_FOUND, FAIL, OK, WARNING, is_root, run_cmd
@@ -46,17 +45,19 @@ LEVEL_NAMES = {
 #   verified            — профиль проверен на стенде;
 #   notes               — примечание (в отчёт не выводится).
 # Без protection_service и active_if_filtering максимальный уровень продукта — RUNNING.
-PRODUCT_FIELDS = {
-    "id": True,
-    "name": True,
-    "kinds": True,
-    "services": True,
-    "files": True,
-    "protection_service": False,
-    "active_if_filtering": False,
-    "verified": False,
-    "notes": False,
-}
+# OrderedDict: в Python 3.5 обычный словарь не сохраняет порядок, а от порядка зависит,
+# какое отсутствующее поле будет названо в сообщении об ошибке первым.
+PRODUCT_FIELDS = OrderedDict([
+    ("id", True),
+    ("name", True),
+    ("kinds", True),
+    ("services", True),
+    ("files", True),
+    ("protection_service", False),
+    ("active_if_filtering", False),
+    ("verified", False),
+    ("notes", False),
+])
 
 KNOWN_KINDS = ["antivirus", "firewall"]
 
@@ -170,7 +171,9 @@ def load_products(path: str) -> List[dict]:
     """
     try:
         with open(path, "r", encoding="utf-8") as products_file:
-            data = json.load(products_file)
+            # object_pairs_hook=OrderedDict сохраняет порядок полей, как в файле: тогда
+            # первым в сообщении об ошибке будет названо первое неверное поле продукта.
+            data = json.load(products_file, object_pairs_hook=OrderedDict)
     except json.JSONDecodeError as exc:
         raise ValueError("{}: ошибка JSON в строке {}, столбце {}: {}".format(
             path, exc.lineno, exc.colno, exc.msg))

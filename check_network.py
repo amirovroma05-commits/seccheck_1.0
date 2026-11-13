@@ -5,8 +5,6 @@
 поэтому решение принимается по TCP-подключению, а ping выводится только для сведения.
 """
 
-from __future__ import annotations
-
 import socket
 import time
 from typing import List, Tuple
