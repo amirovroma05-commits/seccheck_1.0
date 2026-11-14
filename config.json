@@ -3,8 +3,7 @@
     "ru_hosts": ["ya.ru", "vk.com"],
     "foreign_hosts": ["example.com", "github.com"],
     "tcp_port": 443,
-    "tcp_timeout_s": 3,
-    "ping_timeout_s": 2
+    "tcp_timeout_s": 3
   },
   "presence": {
     "cmd_timeout_s": 5
@@ -15,7 +14,6 @@
     "timeout_s": 3
   },
   "antivirus_test": {
-    "eicar_dir": null,
     "eicar_timeout_s": 30,
     "poll_interval_s": 1
   }

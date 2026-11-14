@@ -11,13 +11,11 @@
 пути проверяются только через os.path.exists.
 """
 
-import json
 import os
 import re
-from collections import OrderedDict
 from typing import List, Tuple
 
-from common import FAIL, OK, WARNING, run_cmd
+from common import FAIL, OK, WARNING, load_json, run_cmd
 
 # Настройки берутся из секции "presence" файла настроек (см. README.md, «Настройки»):
 #   cmd_timeout_s — таймаут одной команды systemctl, с.
@@ -28,25 +26,12 @@ SERVICE_STOPPED = "остановлена"
 SERVICE_NOT_INSTALLED = "не установлена"
 SERVICE_UNKNOWN = "состояние неизвестно"
 
-# Поля продукта в products.json: имя поля -> обязательно ли оно.
-#   id       — уникальный идентификатор;
+# Поля продукта в products.json (другие поля игнорируются):
+#   id       — идентификатор (по нему M3 выбирает команды тестового правила МЭ);
 #   name     — название для отчёта;
 #   kinds    — "antivirus" и/или "firewall";
 #   services — службы systemd: любая установленная -> продукт найден;
-#   files    — файлы: любой существующий -> продукт найден;
-#   verified — имена служб и пути проверены на реальной системе;
-#   notes    — примечание (в отчёт не выводится).
-# OrderedDict: в Python 3.5 обычный словарь не сохраняет порядок, а от порядка зависит,
-# какое отсутствующее поле будет названо в сообщении об ошибке первым.
-PRODUCT_FIELDS = OrderedDict([
-    ("id", True),
-    ("name", True),
-    ("kinds", True),
-    ("services", True),
-    ("files", True),
-    ("verified", False),
-    ("notes", False),
-])
+#   files    — абсолютные пути: любой существующий файл -> продукт найден.
 
 KNOWN_KINDS = ["antivirus", "firewall"]
 
@@ -55,131 +40,57 @@ KNOWN_KINDS = ["antivirus", "firewall"]
 # Используется re.fullmatch: «$» в re.match пропустил бы перевод строки в конце имени.
 SERVICE_NAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9@._-]*"
 
-def show(value: object) -> str:
-    """Значение из файла для сообщения об ошибке.
-
-    json.dumps берёт строку в кавычки и экранирует управляющие символы, поэтому
-    содержимое файла не может испортить вывод в терминале.
-    """
-    return json.dumps(value, ensure_ascii=False)
-
 
 def is_service_name(value: object) -> bool:
     """Является ли значение допустимым именем службы systemd."""
     return isinstance(value, str) and re.fullmatch(SERVICE_NAME_PATTERN, value) is not None
 
 
-def is_string_list(value: object) -> bool:
-    """Является ли значение списком строк (возможно, пустым)."""
-    if not isinstance(value, list):
-        return False
-    for item in value:
-        if not isinstance(item, str):
-            return False
-    return True
+def check_product(item: object) -> bool:
+    """Подходит ли описание одного продукта под формат products.json.
 
-
-def check_product(item: object) -> dict:
-    """Проверить описание одного продукта и вернуть его с заполненными значениями
-    по умолчанию. При ошибке выбросить ValueError с описанием (без номера продукта).
+    Защитные проверки: имя службы должно подходить под SERVICE_NAME_PATTERN, чтобы
+    systemctl не принял его за ключ командной строки; пути должны быть абсолютными.
     """
     if not isinstance(item, dict):
-        raise ValueError("ожидается объект {...}, получено " + show(item))
-
-    # Неизвестные поля — ошибка: так ловятся опечатки в именах полей.
-    for field in item:
-        if field not in PRODUCT_FIELDS:
-            raise ValueError("неизвестное поле " + show(field))
-    for field, required in PRODUCT_FIELDS.items():
-        if required and field not in item:
-            raise ValueError("нет обязательного поля " + show(field))
-
+        return False
     for field in ("id", "name"):
-        if not isinstance(item[field], str) or item[field].strip() == "":
-            raise ValueError("поле {} должно быть непустой строкой".format(show(field)))
-
-    kinds = item["kinds"]
-    if not is_string_list(kinds) or len(kinds) == 0:
-        raise ValueError('поле "kinds" должно быть непустым списком из "antivirus", '
-                         '"firewall"')
+        if not isinstance(item.get(field), str) or item[field].strip() == "":
+            return False
+    kinds = item.get("kinds")
+    if not isinstance(kinds, list) or len(kinds) == 0:
+        return False
     for kind in kinds:
         if kind not in KNOWN_KINDS:
-            raise ValueError('поле "kinds": неизвестный вид {} (допустимы "antivirus", '
-                             '"firewall")'.format(show(kind)))
-
-    if not is_string_list(item["services"]):
-        raise ValueError('поле "services" должно быть списком строк')
-    for service in item["services"]:
+            return False
+    services = item.get("services")
+    if not isinstance(services, list):
+        return False
+    for service in services:
         if not is_service_name(service):
-            raise ValueError('поле "services": недопустимое имя службы {} (латинские буквы, '
-                             'цифры, @ . _ -; первый символ — буква или цифра)'
-                             .format(show(service)))
-
-    if not is_string_list(item["files"]):
-        raise ValueError('поле "files" должно быть списком строк')
-    for path in item["files"]:
-        if not path.startswith("/"):
-            raise ValueError('поле "files": путь {} должен быть абсолютным (начинаться '
-                             'с «/»)'.format(show(path)))
-
-    if "verified" in item and not isinstance(item["verified"], bool):
-        raise ValueError('поле "verified" должно быть true или false')
-
-    if "notes" in item and not isinstance(item["notes"], str):
-        raise ValueError('поле "notes" должно быть строкой')
-
-    # Значения по умолчанию для необязательных полей.
-    product = dict(item)
-    product.setdefault("verified", False)
-    product.setdefault("notes", "")
-    return product
+            return False
+    files = item.get("files")
+    if not isinstance(files, list):
+        return False
+    for path in files:
+        if not isinstance(path, str) or not path.startswith("/"):
+            return False
+    return True
 
 
 def load_products(path: str) -> List[dict]:
     """Прочитать и проверить файл продуктов. Вернуть список словарей продуктов.
 
-    Любая ошибка (нет файла, неверный JSON, неверное поле, повтор id) превращается
-    в ValueError с текстом вида «путь: продукт №3 (id=kesl): что не так».
+    Любая ошибка — ValueError с одним сообщением: «путь: некорректный продукт №N»
+    (или общее сообщение load_json, если файл не прочитан).
     """
-    try:
-        with open(path, "r", encoding="utf-8") as products_file:
-            # object_pairs_hook=OrderedDict сохраняет порядок полей, как в файле: тогда
-            # первым в сообщении об ошибке будет названо первое неверное поле продукта.
-            data = json.load(products_file, object_pairs_hook=OrderedDict)
-    except json.JSONDecodeError as exc:
-        raise ValueError("{}: ошибка JSON в строке {}, столбце {}: {}".format(
-            path, exc.lineno, exc.colno, exc.msg))
-    except UnicodeDecodeError:
-        raise ValueError("{}: файл не в кодировке UTF-8".format(path))
-    except OSError as exc:
-        raise ValueError("{}: не удалось прочитать файл: {}".format(path, exc.strerror))
-
-    if not isinstance(data, dict):
+    data = load_json(path)
+    if not isinstance(data, dict) or not isinstance(data.get("products"), list):
         raise ValueError('{}: ожидается объект {{"products": [...]}}'.format(path))
-    for field in data:
-        if field != "products":
-            raise ValueError("{}: неизвестное поле верхнего уровня {}".format(path, show(field)))
-    if "products" not in data or not isinstance(data["products"], list):
-        raise ValueError('{}: поле "products" должно быть списком'.format(path))
-
-    products = []
-    seen_ids = []
     for number, item in enumerate(data["products"], start=1):
-        # id для сообщения об ошибке, если его удаётся прочитать.
-        product_id = "?"
-        if isinstance(item, dict) and isinstance(item.get("id"), str):
-            product_id = item["id"]
-        prefix = "{}: продукт №{} (id={})".format(path, number, product_id)
-
-        try:
-            product = check_product(item)
-        except ValueError as exc:
-            raise ValueError("{}: {}".format(prefix, exc))
-        if product["id"] in seen_ids:
-            raise ValueError("{}: id повторяется (уже был у другого продукта)".format(prefix))
-        seen_ids.append(product["id"])
-        products.append(product)
-    return products
+        if not check_product(item):
+            raise ValueError("{}: некорректный продукт №{}".format(path, number))
+    return data["products"]
 
 
 def service_state(name: str, timeout_s: float) -> str:
@@ -267,14 +178,10 @@ def run(cfg: dict, products: List[dict]) -> Tuple[str, List[str], List[str]]:
     for product in products:
         found, stopped, evidence = detect_product(product, timeout_s)
         if not found:
-            # Шаг 4. Непроверенный профиль мог не найти продукт из-за неверных имён служб
-            # и путей, поэтому пометка «профиль не проверен» — только у ненайденных.
-            # Признаки здесь возможны только вида «служба X: состояние неизвестно».
-            line = product["name"] + ": не найден"
-            if not product["verified"]:
-                line += " (профиль не проверен на стенде)"
-            if evidence or not product["verified"]:
-                details.append(line)
+            # Шаг 4. Ненайденный продукт показывается, только если по нему есть признаки.
+            # Здесь они возможны только вида «служба X: состояние неизвестно».
+            if evidence:
+                details.append(product["name"] + ": не найден")
             for item in evidence:
                 details.append("  " + item)
             continue

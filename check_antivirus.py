@@ -12,7 +12,6 @@
 """
 
 import os
-import sys
 import tempfile
 import time
 from typing import List, Tuple
@@ -20,8 +19,6 @@ from typing import List, Tuple
 from common import ERROR, FAIL, OK
 
 # Настройки берутся из секции "antivirus_test" файла настроек (см. README.md, «Настройки»):
-#   eicar_dir       — каталог, внутри которого создаётся подкаталог для теста,
-#                     или null (системный временный каталог);
 #   eicar_timeout_s — сколько ждать реакции АВ, с;
 #   poll_interval_s — как часто проверять файл, с.
 
@@ -42,19 +39,6 @@ def eicar_string() -> str:
     return "".join(EICAR_PARTS)
 
 
-def show_progress(elapsed: float, timeout_s: float) -> None:
-    """Напечатать прогресс ожидания в одну строку (только если вывод — терминал)."""
-    if sys.stdout.isatty():
-        print("\rОжидание реакции АВ… {:.0f}/{} с".format(elapsed, timeout_s),
-              end="", flush=True)
-
-
-def clear_progress() -> None:
-    """Стереть строку прогресса."""
-    if sys.stdout.isatty():
-        print("\r" + " " * 40 + "\r", end="", flush=True)
-
-
 def os_error_text(exc: OSError) -> str:
     """Краткое описание ошибки ввода-вывода для итоговой строки."""
     return exc.strerror or str(exc)
@@ -70,26 +54,25 @@ def write_and_wait(path: str, content: str, timeout_s: float,
     """Шаги 3–9. Записать файл и ждать реакции АВ не дольше timeout_s, проверяя файл
     каждые interval_s секунд. Вернуть (статус, результат).
     """
+    # Шаг 3. Одна строка перед ожиданием, без счётчика.
+    print("Ожидание реакции АВ (до {} с)…".format(timeout_s))
     start = time.monotonic()
-    # Шаг 3. Многие АВ проверяют файл при закрытии после записи, поэтому
-    # данные сбрасываются на диск (flush, fsync) до закрытия файла.
+    # Резидентная защита проверяет файл при закрытии после записи; `with` закрывает файл
+    # до начала ожидания.
     try:
         with open(path, "w", encoding="utf-8") as test_file:
             test_file.write(content)
-            test_file.flush()
-            os.fsync(test_file.fileno())
     except PermissionError:
         # Шаг 4. PermissionError — это EACCES или EPERM: запись запретил АВ.
         return OK, detected(time.monotonic() - start, "запись заблокирована")
     except OSError as exc:
-        # Другие ошибки (нет каталога, нет места) реакцией АВ не считаются.
+        # Другие ошибки (нет места на диске и т. п.) реакцией АВ не считаются.
         return ERROR, "ошибка проверки (запись тестового файла: {})".format(os_error_text(exc))
 
     while True:
         # Шаг 5.
         time.sleep(interval_s)
         elapsed = time.monotonic() - start
-        show_progress(elapsed, timeout_s)
 
         # Шаг 6.
         if not os.path.exists(path):
@@ -116,8 +99,7 @@ def write_and_wait(path: str, content: str, timeout_s: float,
 def remove_test_files(path: str, tmp_dir: str) -> Tuple[List[str], List[str]]:
     """Шаг 10. Удалить свой тестовый файл и свой подкаталог.
 
-    Вернуть (подробности, предупреждения). os.rmdir удаляет только пустой каталог, а сам
-    eicar_dir и всё прочее в нём программа не трогает.
+    Вернуть (подробности, предупреждения). os.rmdir удаляет только пустой каталог.
     """
     details = []
     warnings = []
@@ -143,36 +125,33 @@ def run(cfg: dict) -> Tuple[str, List[str], List[str]]:
     cfg — секция "antivirus_test" файла настроек.
     """
     content = eicar_string()
-    # Шаг 2. Создать собственный подкаталог: внутри eicar_dir или, если он null,
-    # в системном временном каталоге (dir=None). mkdtemp создаёт каталог с уникальным
-    # именем и правами 700, поэтому чужой файл или ссылку на его месте подложить нельзя.
+    # Шаг 2. Создать собственный подкаталог во временном каталоге системы. mkdtemp
+    # создаёт каталог с уникальным именем и правами 700, поэтому чужой файл или ссылку
+    # на его месте подложить нельзя.
     try:
-        tmp_dir = tempfile.mkdtemp(prefix="seccheck_", dir=cfg["eicar_dir"])
+        tmp_dir = tempfile.mkdtemp(prefix="seccheck_")
     except OSError as exc:
         return ERROR, ["ошибка проверки (создание каталога: {})".format(
             os_error_text(exc))], []
     path = os.path.join(tmp_dir, FILE_NAME)
     details = ["Тестовый файл: " + path]
 
+    finished = False  # проверка дошла до конца без исключения
     try:
         status, result = write_and_wait(path, content, cfg["eicar_timeout_s"],
                                         cfg["poll_interval_s"])
-    except BaseException:
-        # Ctrl+C (KeyboardInterrupt) или неожиданный сбой: результата проверки не будет,
-        # поэтому файл удаляется здесь, а предупреждения о неудаче печатаются сразу.
-        # Затем исключение передаётся дальше (raise).
-        clear_progress()
-        _cleanup_details, warnings = remove_test_files(path, tmp_dir)
-        for line in warnings:
-            print(line)
-        raise
-
-    # Шаг 10. Обычное завершение: удалить файл. Предупреждения о неудалённом файле или
-    # каталоге печатаются всегда, а не только с -v: на диске остался тестовый файл.
-    clear_progress()
-    cleanup_details, warnings = remove_test_files(path, tmp_dir)
+        finished = True
+    finally:
+        # Шаг 10. Удалить файл и подкаталог при любом исходе, в том числе после Ctrl+C.
+        cleanup_details, warnings = remove_test_files(path, tmp_dir)
+        if not finished:
+            # Проверку прервали: результата не будет, поэтому предупреждения печатаются
+            # сразу, затем исключение идёт дальше.
+            for line in warnings:
+                print(line)
     details.extend(cleanup_details)
 
+    # Предупреждения о неудалённом файле печатаются всегда, а не только с -v.
     brief = [result]
     if status == FAIL:
         # Шаг 11. Подсказка; каталог, который должна охватывать защита, — только с -v.

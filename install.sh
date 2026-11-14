@@ -16,12 +16,6 @@ fi
 
 # Каталог, где лежит этот скрипт (исходники программы).
 SRC_DIR=$(cd "$(dirname "$0")" && pwd)
-for required in main.py products.json config.json; do
-    if [ ! -f "$SRC_DIR/$required" ]; then
-        echo "Не найден $SRC_DIR/$required: запускайте скрипт из каталога проекта" >&2
-        exit 1
-    fi
-done
 
 # Удалить старую версию программы целиком, чтобы не осталось файлов, которых больше нет
 # в проекте. Настройки лежат отдельно, в /etc/seccheck, и здесь не затрагиваются.
@@ -40,34 +34,14 @@ printf '#!/bin/sh\nexec /usr/bin/python3 %s/main.py "$@"\n' "$INSTALL_DIR" > "$W
 chown root:root "$WRAPPER"
 chmod 755 "$WRAPPER"
 
-# Настройки: создать при первой установке, существующие не трогать.
+# Настройки: создать при первой установке, существующие не трогать. Об ошибках в файле
+# настроек программа сообщит сама при запуске.
 install -d -o root -g root -m 755 "$CONFIG_DIR"
-CONFIG_OK=yes
 if [ ! -e "$CONFIG_FILE" ]; then
     install -o root -g root -m 644 "$SRC_DIR/config.json" "$CONFIG_FILE"
     echo "Создан файл настроек $CONFIG_FILE"
 else
     echo "Файл настроек $CONFIG_FILE уже есть, он не изменён."
-    # Проверить существующий файл той же функцией, что и программа.
-    # -I: не брать модули из текущего каталога и пользовательских путей; -B: без __pycache__.
-    if ! /usr/bin/python3 -I -B -c '
-import sys
-sys.path.insert(0, sys.argv[1])
-import common
-try:
-    common.load_config(sys.argv[2])
-except ValueError as exc:
-    print(exc, file=sys.stderr)
-    sys.exit(1)
-' "$INSTALL_DIR" "$CONFIG_FILE"; then
-        CONFIG_OK=no
-        echo "В файле настроек есть ошибки (см. выше). Возможно, в новой версии появились" >&2
-        echo "новые ключи: сравните $CONFIG_FILE с образцом $INSTALL_DIR/config.json" >&2
-        echo "и исправьте файл, иначе программа не запустится." >&2
-    fi
 fi
 
 echo "SecCheck установлен в $INSTALL_DIR. Запуск: sudo seccheck"
-if [ "$CONFIG_OK" = no ]; then
-    exit 1
-fi

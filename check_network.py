@@ -3,32 +3,20 @@
 Отвечает на вопрос: есть ли подключение к интернету (полное или ограниченное).
 
 Узлы делятся на две группы, российские и зарубежные, чтобы отличить полный доступ
-от ограниченного (белые списки мобильных операторов, блокировки). ICMP часто режется,
-поэтому решение принимается по TCP-подключению, а ping выводится только для сведения.
+от ограниченного (белые списки мобильных операторов, блокировки). Решение принимается
+по TCP-подключению; ping не используется, потому что ICMP часто режется.
 """
 
 import socket
 import time
 from typing import List, Tuple
 
-from common import FAIL, OK, WARNING, run_cmd
+from common import FAIL, OK, WARNING
 
 # Настройки берутся из секции "network" файла настроек (см. README.md, «Настройки»):
 #   ru_hosts, foreign_hosts — группы узлов;
 #   tcp_port               — порт для TCP-подключения;
-#   tcp_timeout_s          — таймаут одного TCP-подключения, с;
-#   ping_timeout_s         — время ожидания ответа на ping, с (целое число).
-
-
-def ping(host: str, timeout_s: int) -> bool:
-    """Отправить узлу один ICMP-запрос; True, если пришёл ответ.
-
-    Имя узла уже проверено load_config(): оно не начинается с «-», поэтому ping
-    не примет его за ключ.
-    """
-    code, _stdout, _stderr = run_cmd(["ping", "-c", "1", "-W", str(timeout_s), host],
-                                     timeout=timeout_s + 3)
-    return code == 0
+#   tcp_timeout_s          — таймаут одного TCP-подключения, с.
 
 
 def tcp_connect(host: str, port: int, timeout_s: float) -> Tuple[bool, int, bool]:
@@ -48,56 +36,47 @@ def tcp_connect(host: str, port: int, timeout_s: float) -> Tuple[bool, int, bool
     return True, int((time.monotonic() - start) * 1000), False
 
 
+def check_group(hosts: List[str], port: int, timeout_s: float) -> Tuple[bool, bool, List[str]]:
+    """Шаги 2–3. Подключиться по TCP к каждому узлу группы по очереди.
+
+    Вернуть (ответил ли хотя бы один узел, у всех ли узлов ошибка DNS, строки подробностей).
+    Строка подробностей — имя узла и результат TCP: да с временем, нет или ошибка DNS.
+    """
+    any_ok = False
+    all_dns_errors = True
+    lines = []
+    for host in hosts:
+        ok, ms, dns_error = tcp_connect(host, port, timeout_s)
+        if ok:
+            any_ok = True
+            result = "да  ({} мс)".format(ms)
+        elif dns_error:
+            result = "нет (ошибка DNS)"
+        else:
+            result = "нет"
+        if not dns_error:
+            all_dns_errors = False
+        lines.append("{:<14} TCP {}: {}".format(host, port, result))
+    return any_ok, all_dns_errors, lines
+
+
 def run(cfg: dict) -> Tuple[str, List[str], List[str]]:
     """Выполнить проверку M1. Вернуть (статус, краткие строки, подробности).
 
     cfg — секция "network" файла настроек.
     """
     port = cfg["tcp_port"]
-    # Шаг 1. Все узлы с пометкой группы.
-    hosts = []
-    for host in cfg["ru_hosts"]:
-        hosts.append(("ru", host))
-    for host in cfg["foreign_hosts"]:
-        hosts.append(("foreign", host))
+    timeout_s = cfg["tcp_timeout_s"]
+    # Шаг 1. Проверить группу ru_hosts, затем foreign_hosts (шаги 2–3 — в check_group).
+    ru_ok, ru_dns_errors, ru_lines = check_group(cfg["ru_hosts"], port, timeout_s)
+    foreign_ok, foreign_dns_errors, foreign_lines = check_group(cfg["foreign_hosts"], port,
+                                                                timeout_s)
+    # Подробности (только для -v): строки по узлам обеих групп.
+    details = ru_lines + foreign_lines
 
-    # Шаги 2–3. Для каждого узла: ping (для сведения) и TCP-подключение.
-    checked = []  # список словарей с результатами по узлам
-    for group, host in hosts:
-        icmp = ping(host, cfg["ping_timeout_s"])
-        tcp, ms, dns_error = tcp_connect(host, port, cfg["tcp_timeout_s"])
-        checked.append({"group": group, "host": host, "icmp": icmp, "tcp": tcp,
-                        "ms": ms, "dns_error": dns_error})
-
-    # Шаг 4. Группа доступна, если хотя бы один её узел ответил по TCP.
-    ru_ok = False
-    foreign_ok = False
-    for item in checked:
-        if item["tcp"] and item["group"] == "ru":
-            ru_ok = True
-        if item["tcp"] and item["group"] == "foreign":
-            foreign_ok = True
-
-    # Шаг 8. Подробности по каждому узлу (только для -v).
-    details = []
-    for item in checked:
-        if item["dns_error"]:
-            tcp_text = "нет (ошибка DNS)"
-        elif item["tcp"]:
-            tcp_text = "да  ({} мс)".format(item["ms"])
-        else:
-            tcp_text = "нет"
-        details.append("{:<14} ICMP: {:<4} TCP {}: {}".format(
-            item["host"], "да" if item["icmp"] else "нет", port, tcp_text))
-
-    any_icmp = any(item["icmp"] for item in checked)
-    any_tcp = any(item["tcp"] for item in checked)
-    if any_tcp and not any_icmp:
-        details.append("ICMP блокируется: ни один узел не ответил на ping")
-
-    # Шаги 5–7. Итоговый статус.
+    # Шаги 4–6. Итоговый статус.
     if not ru_ok and not foreign_ok:
-        if all(item["dns_error"] for item in checked):
+        if ru_dns_errors and foreign_dns_errors:
             details.append("Не работает DNS: ни одно имя узла не разрешилось")
         return FAIL, ["нет"], details
     if ru_ok and foreign_ok:

@@ -5,35 +5,28 @@
       "name": "ClamAV",
       "kinds": ["antivirus"],
       "services": ["clamav-daemon"],
-      "files": ["/usr/sbin/clamd"],
-      "verified": false,
-      "notes": "Имена служб и путей не проверены на стенде"
+      "files": ["/usr/sbin/clamd"]
     },
     {
       "id": "ufw",
       "name": "ufw",
       "kinds": ["firewall"],
       "services": ["ufw"],
-      "files": ["/usr/sbin/ufw"],
-      "verified": true
+      "files": ["/usr/sbin/ufw"]
     },
     {
       "id": "drweb",
       "name": "Dr.Web для Linux",
       "kinds": ["antivirus", "firewall"],
       "services": ["drweb-configd"],
-      "files": ["/opt/drweb.com/bin/drweb-ctl"],
-      "verified": true,
-      "notes": "служба drweb-configd и файл drweb-ctl подтверждены на Ubuntu 24.04"
+      "files": ["/opt/drweb.com/bin/drweb-ctl"]
     },
     {
       "id": "kesl",
       "name": "Kaspersky Endpoint Security для Linux",
       "kinds": ["antivirus", "firewall"],
       "services": ["kesl"],
-      "files": ["/opt/kaspersky/kesl/bin/kesl-control"],
-      "verified": false,
-      "notes": "Имена взяты из документации производителя, на стенде не проверены"
+      "files": ["/opt/kaspersky/kesl/bin/kesl-control"]
     }
   ]
 }

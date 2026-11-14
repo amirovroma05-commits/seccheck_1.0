@@ -1,11 +1,12 @@
 """Общие константы и функции SecCheck: статусы проверок, запуск команд, сведения о системе,
-загрузка и проверка файла настроек."""
+чтение JSON-файлов, загрузка и проверка файла настроек."""
 
 import json
 import os
 import re
 import subprocess
-from typing import List, Optional, Tuple
+from collections import OrderedDict
+from typing import List, Tuple
 
 APP_NAME = "SecCheck"
 APP_VERSION = "0.1"
@@ -22,18 +23,18 @@ ERROR = "ERROR"                # сбой программы или нехват
 CMD_NOT_FOUND = -1             # программы нет в системе
 CMD_TIMEOUT = -2               # команда не завершилась за отведённое время
 
-# Файл настроек, если не указан флаг --config.
+# Файл настроек. Его создаёт install.sh при первой установке.
 DEFAULT_CONFIG_PATH = "/etc/seccheck/config.json"
 
 # Ожидаемая структура config.json: секция -> {ключ: вид значения}.
-# Все секции и ключи обязательны. Виды значений проверяет функция check_value().
+# Все перечисленные ключи обязательны, другие секции и ключи игнорируются (например,
+# ключи из прежних версий). Виды значений проверяет функция check_value().
 CONFIG_SCHEMA = {
     "network": {
         "ru_hosts": "host_list",
         "foreign_hosts": "host_list",
         "tcp_port": "port",
         "tcp_timeout_s": "timeout",
-        "ping_timeout_s": "int_timeout",
     },
     "presence": {
         "cmd_timeout_s": "timeout",
@@ -44,7 +45,6 @@ CONFIG_SCHEMA = {
         "timeout_s": "timeout",
     },
     "antivirus_test": {
-        "eicar_dir": "dir_or_null",
         "eicar_timeout_s": "timeout",
         "poll_interval_s": "timeout",
     },
@@ -53,8 +53,9 @@ CONFIG_SCHEMA = {
 # Наибольшее допустимое значение таймаутов и интервалов, с.
 MAX_TIMEOUT_S = 300
 
-# Допустимое имя узла. Первый символ — буква или цифра, поэтому имя не может начинаться
-# с «-» и не будет принято ping за ключ командной строки (например, «-c100»).
+# Допустимое имя узла. Программа работает от root, а адрес узла M3 попадает в команду ufw,
+# поэтому имя проверяется заранее: только буквы, цифры, точка и дефис, первый символ —
+# буква или цифра (имя не может начинаться с «-» и быть принято за ключ команды).
 # Используется re.fullmatch: «$» в re.match пропустил бы перевод строки в конце имени.
 HOST_NAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9.-]*"
 MAX_HOST_NAME_LENGTH = 253
@@ -131,94 +132,56 @@ def is_host_name(value: object) -> bool:
             and re.fullmatch(HOST_NAME_PATTERN, value) is not None)
 
 
-def check_value(value: object, kind: str) -> Optional[str]:
-    """Проверить значение по виду из CONFIG_SCHEMA.
-
-    Вернуть None, если значение подходит, иначе описание того, что ожидалось.
-    """
-    host_rule = ("латинские буквы, цифры, точка и дефис, первый символ — буква или цифра, "
-                 "не длиннее {} символов".format(MAX_HOST_NAME_LENGTH))
+def check_value(value: object, kind: str) -> bool:
+    """Подходит ли значение под вид из CONFIG_SCHEMA."""
     if kind == "port":
-        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 65535:
-            return "ожидается целое число от 1 до 65535"
-    elif kind == "timeout":
-        if not is_number(value) or not 0 < value <= MAX_TIMEOUT_S:
-            return "ожидается число больше 0 и не больше {}".format(MAX_TIMEOUT_S)
-    elif kind == "int_timeout":
-        # Значение передаётся в `ping -W`, а старые версии ping принимают только целое.
-        if isinstance(value, bool) or not isinstance(value, int) \
-                or not 0 < value <= MAX_TIMEOUT_S:
-            return "ожидается целое число больше 0 и не больше {}".format(MAX_TIMEOUT_S)
-    elif kind == "host":
-        if not is_host_name(value):
-            return "недопустимое имя узла ({})".format(host_rule)
-    elif kind == "host_list":
+        return is_number(value) and isinstance(value, int) and 1 <= value <= 65535
+    if kind == "timeout":
+        return is_number(value) and 0 < value <= MAX_TIMEOUT_S
+    if kind == "host":
+        return is_host_name(value)
+    if kind == "host_list":
         if not isinstance(value, list) or len(value) == 0:
-            return "ожидается непустой список имён узлов"
+            return False
         for item in value:
             if not is_host_name(item):
-                return "недопустимое имя узла {} ({})".format(
-                    json.dumps(item, ensure_ascii=False), host_rule)
-    elif kind == "dir_or_null":
-        if value is None:
-            return None
-        if not isinstance(value, str) or not value.startswith("/"):
-            return "ожидается null или абсолютный путь к каталогу (начинается с «/»)"
-        if not os.path.isdir(value):
-            return "каталог не существует"
-    else:
-        # Сюда попадаем только при опечатке в CONFIG_SCHEMA, то есть при ошибке в коде.
-        raise ValueError("неизвестный вид значения в CONFIG_SCHEMA: " + kind)
-    return None
+                return False
+        return True
+    # Неизвестный вид возможен только при опечатке в CONFIG_SCHEMA.
+    return False
+
+
+def load_json(path: str) -> object:
+    """Прочитать JSON-файл в кодировке UTF-8 и вернуть его содержимое.
+
+    object_pairs_hook=OrderedDict сохраняет порядок ключей как в файле (в Python 3.5
+    обычный словарь его не сохраняет). Любая ошибка чтения или разбора (нет файла, нет
+    прав, не UTF-8, ошибка синтаксиса) даёт одно общее сообщение. JSONDecodeError
+    и UnicodeDecodeError — подклассы ValueError.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as json_file:
+            return json.load(json_file, object_pairs_hook=OrderedDict)
+    except (OSError, ValueError):
+        raise ValueError("{}: файл не найден или не является корректным JSON".format(path))
 
 
 def load_config(path: str) -> dict:
     """Прочитать и проверить файл настроек. Вернуть словарь {секция: {ключ: значение}}.
 
-    Любая ошибка (нет файла, неверный JSON, лишний или отсутствующий ключ, неверное
-    значение) превращается в ValueError с текстом, где указаны файл, секция и ключ.
+    Проверяется только, что каждый ключ из CONFIG_SCHEMA есть и его значение подходит
+    по виду. Любая ошибка — ValueError с одним сообщением.
     """
     if not os.path.exists(path):
-        raise ValueError("Файл настроек не найден: {}. Установите программу "
-                         "(sudo ./install.sh) или укажите файл: --config ./config.json"
-                         .format(path))
-    try:
-        with open(path, "r", encoding="utf-8") as config_file:
-            config = json.load(config_file)
-    except json.JSONDecodeError as exc:
-        raise ValueError("{}: ошибка JSON в строке {}, столбце {}: {}".format(
-            path, exc.lineno, exc.colno, exc.msg))
-    except UnicodeDecodeError:
-        raise ValueError("{}: файл не в кодировке UTF-8".format(path))
-    except OSError as exc:
-        raise ValueError("{}: не удалось прочитать файл: {}".format(path, exc.strerror))
-
-    if not isinstance(config, dict):
-        raise ValueError("{}: ожидается объект JSON {{...}} с секциями настроек".format(path))
-
-    # Неизвестные секции и ключи — ошибка: так ловятся опечатки.
-    for section in config:
-        if section not in CONFIG_SCHEMA:
-            raise ValueError("{}: неизвестная секция {}".format(
-                path, json.dumps(section, ensure_ascii=False)))
-
+        raise ValueError("Файл настроек не найден: {}. Установите программу: "
+                         "sudo ./install.sh".format(path))
+    config = load_json(path)
     for section, keys in CONFIG_SCHEMA.items():
-        if section not in config:
-            raise ValueError('{}: нет секции "{}"'.format(path, section))
-        if not isinstance(config[section], dict):
-            raise ValueError('{}: секция "{}" должна быть объектом {{...}}'.format(
-                path, section))
-        for key in config[section]:
-            if key not in keys:
-                raise ValueError('{}: секция "{}": неизвестный ключ {}'.format(
-                    path, section, json.dumps(key, ensure_ascii=False)))
+        # Нет секции или она не объект — значит, нет и её ключей.
+        values = {}
+        if isinstance(config, dict) and isinstance(config.get(section), dict):
+            values = config[section]
         for key, kind in keys.items():
-            if key not in config[section]:
-                raise ValueError('{}: секция "{}": нет ключа "{}"'.format(path, section, key))
-            value = config[section][key]
-            problem = check_value(value, kind)
-            if problem is not None:
-                raise ValueError('{}: секция "{}", ключ "{}": {}, получено {}'.format(
-                    path, section, key, problem, json.dumps(value, ensure_ascii=False)))
-
+            if key not in values or not check_value(values[key], kind):
+                raise ValueError("{}: некорректное значение {}.{}".format(path, section, key))
     return config
