@@ -80,8 +80,8 @@ def run_presence() -> Result:
 
 
 def run_firewall() -> Result:
-    """Запустить M3 с секцией "firewall_test"."""
-    return check_firewall.run(config["firewall_test"])
+    """Запустить M3 с секцией "firewall_test" и загруженным списком продуктов."""
+    return check_firewall.run(config["firewall_test"], products)
 
 
 def run_antivirus() -> Result:
@@ -148,7 +148,8 @@ def run_check(index: int) -> None:
 
     Неожиданное исключение в модуле не роняет программу, а даёт статус ERROR.
     Ctrl+C (KeyboardInterrupt) не перехватывается: его обрабатывает блок
-    `if __name__ == "__main__"` в конце файла.
+    `if __name__ == "__main__"` в конце файла. SystemExit (SIGTERM или SIGHUP во время M3)
+    тоже не перехватывается: `except Exception` его не ловит, и программа завершается.
     """
     check_id, title, function = CHECKS[index]
     print("Выполняется {}: {}…".format(check_id, title))
@@ -189,8 +190,8 @@ def print_report() -> None:
 def print_root_warning() -> None:
     """Без прав root предупредить, какие проверки будут ограничены."""
     if not is_root():
-        print("Внимание: нет прав root. Ограничена проверка M3: правила МЭ "
-              "(nft, iptables) не будут прочитаны.")
+        print("Внимание: нет прав root. Проверка M3 не выполнится: для тестового правила МЭ "
+              "нужны права root.")
 
 
 def menu() -> None:
@@ -263,6 +264,7 @@ if __name__ == "__main__":
         sys.exit(main())
     except KeyboardInterrupt:
         # Ctrl+C в любой момент: только перевод строки, чтобы приглашение терминала
-        # не склеилось с выводом. Файл EICAR к этому моменту уже удалён в check_antivirus.
+        # не склеилось с выводом. Файл EICAR (M4) и тестовое правило МЭ (M3) к этому
+        # моменту уже удалены в check_antivirus и check_firewall.
         print()
         sys.exit(EXIT_INTERRUPTED)

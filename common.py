@@ -40,7 +40,6 @@ CONFIG_SCHEMA = {
     },
     "firewall_test": {
         "host": "host",
-        "control_port": "port",
         "test_port": "port",
         "timeout_s": "timeout",
     },
@@ -65,7 +64,7 @@ def run_cmd(cmd: List[str], timeout: float) -> Tuple[int, str, str]:
     """Запустить внешнюю команду и вернуть (код возврата, stdout, stderr).
 
     Команда запускается без оболочки (shell=True не используется), с таймаутом
-    и с LC_ALL=C: вывод утилит локализован, а разбираем мы только английский.
+    и с LC_ALL=C и LANGUAGE=C: вывод утилит локализован, а разбираем мы только английский.
     Если программы нет, код равен CMD_NOT_FOUND, если вышло время — CMD_TIMEOUT.
 
     Вывод читается как байты и декодируется явно, как UTF-8 с заменой ошибочных байтов.
@@ -74,6 +73,9 @@ def run_cmd(cmd: List[str], timeout: float) -> Tuple[int, str, str]:
     """
     env = dict(os.environ)
     env["LC_ALL"] = "C"
+    # Программы на Python (например, ufw) переводят сообщения через модуль gettext, а он
+    # смотрит переменную LANGUAGE раньше LC_ALL. Поэтому она тоже сбрасывается.
+    env["LANGUAGE"] = "C"
     try:
         completed = subprocess.run(
             cmd,
@@ -219,9 +221,4 @@ def load_config(path: str) -> dict:
                 raise ValueError('{}: секция "{}", ключ "{}": {}, получено {}'.format(
                     path, section, key, problem, json.dumps(value, ensure_ascii=False)))
 
-    firewall = config["firewall_test"]
-    if firewall["control_port"] == firewall["test_port"]:
-        raise ValueError('{}: секция "firewall_test": ключи "control_port" и "test_port" '
-                         'должны различаться (контрольный порт разрешён, тестовый запрещён '
-                         'правилом МЭ)'.format(path))
     return config
