@@ -175,10 +175,8 @@ def run(cfg: dict) -> Tuple[str, List[str], List[str]]:
 
     brief = [result]
     if status == FAIL:
-        # Шаг 11. Подсказка; подробные причины для ClamAV (clamd.conf) — только с -v.
-        brief.append("Проверьте, что включена постоянная защита (для ClamAV — clamonacc)")
-        details.append("ClamAV: каталог {} должен входить в OnAccessIncludePath".format(
+        # Шаг 11. Подсказка; каталог, который должна охватывать защита, — только с -v.
+        brief.append("Проверьте, что включена постоянная защита (проверка файлов при доступе)")
+        details.append("Каталог {} должен входить в область постоянной защиты".format(
             os.path.dirname(tmp_dir)))
-        details.append("ClamAV: доступ блокируется только при OnAccessPrevention yes")
-        details.append("ClamAV: служба clamonacc должна быть запущена")
     return status, brief + warnings, details
